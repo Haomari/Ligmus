@@ -1,5 +1,5 @@
 import * as Device from 'expo-device';
-import { Platform, StyleSheet, Animated } from 'react-native';
+import { Platform, StyleSheet, Animated, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useRef } from 'react';
 
@@ -53,19 +53,12 @@ export default function HomeScreen() {
 
     animation.start();
 
-    return () => {
-      animation.stop();
-    };
+    return () => animation.stop();
   }, [activity]);
 
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.activityIndicator, { opacity: activity }]}
-        />
-
         <ThemedView style={styles.heroSection}>
           <AnimatedIcon />
 
@@ -93,6 +86,22 @@ export default function HomeScreen() {
         </ThemedView>
 
         {Platform.OS === 'web' && <WebBadge />}
+
+        
+        <View style={styles.activityRow}>
+          <Animated.View
+            style={[
+              styles.activityDot,
+              {
+                opacity: activity,
+              },
+            ]}
+          />
+
+          <ThemedText type="small" style={styles.activityIndicator}>
+            Project Active
+          </ThemedText>
+        </View>
       </SafeAreaView>
     </ThemedView>
   );
@@ -138,13 +147,17 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.four,
   },
 
-  activityIndicator: {
-    position: 'absolute',
-    top: Spacing.three,
-    right: Spacing.three,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+  activityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: Spacing.one,
+  },
+
+  activityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: '#22c55e',
     shadowColor: '#22c55e',
     shadowOffset: {
@@ -152,8 +165,11 @@ const styles = StyleSheet.create({
       height: 0,
     },
     shadowOpacity: 0.8,
-    shadowRadius: 6,
-    elevation: 5,
-    zIndex: 10,
+    shadowRadius: 5,
+    elevation: 4,
+  },
+
+  activityIndicator: {
+    opacity: 0.6,
   },
 });
