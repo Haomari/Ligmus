@@ -378,4 +378,30 @@ const styles = StyleSheet.create({
     marginTop: 2,
     lineHeight: 16,
   },
+
+  activityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: Spacing.one,
+  },
+
+  activityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#22c55e',
+    shadowColor: '#22c55e',
+    shadowOffset: {
+      width: 0,
+      height: 0,
+    },
+    shadowOpacity: 0.8,
+    shadowRadius: 5,
+    elevation: 4,
+  },
+
+  activityIndicator: {
+    opacity: 0.6,
+  },
 });
