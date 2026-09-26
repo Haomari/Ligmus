@@ -46,20 +46,56 @@ export default function HomeScreen() {
         }>
         {/* Header */}
         <View style={styles.header}>
-          <View>
+          <View style={{ flex: 1 }}>
             <Text style={styles.greeting}>Cześć, {student?.name.split(' ')[0] || 'Uczniu'}! 👋</Text>
             <Text style={styles.subGreeting}>
-              {student?.classGroup || 'Librus Synergia'} • Nr {student?.studentNumber}
+              {student?.name ? `${student.name} • ` : ''}{student?.classGroup || 'Librus Synergia'}{student?.studentNumber ? ` • Nr ${student.studentNumber}` : ''}
             </Text>
           </View>
-          {isDemo && (
+          {isDemo ? (
             <TouchableOpacity
               style={styles.demoBadge}
+              onPress={() => router.push('/login' as any)}>
+              <Text style={styles.demoBadgeText}>Zaloguj (Demo)</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={[styles.demoBadge, { borderColor: '#10b98150' }]}
               onPress={() => router.push('/settings' as any)}>
-              <Text style={styles.demoBadgeText}>Tryb Demo</Text>
+              <Text style={[styles.demoBadgeText, { color: '#10b981' }]}>Librus</Text>
             </TouchableOpacity>
           )}
         </View>
+
+        {isDemo && (
+          <TouchableOpacity
+            style={[
+              styles.card,
+              {
+                backgroundColor: '#1e293b',
+                borderColor: '#38bdf8',
+                borderWidth: 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: 14,
+              },
+            ]}
+            onPress={() => router.push('/login' as any)}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <Ionicons name="log-in-outline" size={24} color="#38bdf8" />
+              <View>
+                <Text style={{ color: '#f8fafc', fontWeight: '700', fontSize: 15 }}>
+                  Zaloguj się do Librusa
+                </Text>
+                <Text style={{ color: '#94a3b8', fontSize: 12 }}>
+                  Wpisz login i hasło, aby zobaczyć swoje dane
+                </Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
+          </TouchableOpacity>
+        )}
 
         {/* Lucky Number Card */}
         <View style={[styles.card, styles.luckyCard]}>

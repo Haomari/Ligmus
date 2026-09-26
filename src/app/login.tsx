@@ -33,7 +33,14 @@ export default function LoginScreen() {
     if (res.success) {
       router.replace('/');
     } else {
-      setErrorMessage(res.error || 'Nie udało się zalogować. Sprawdź poprawność danych.');
+      const err = res.error;
+      const errorText =
+        typeof err === 'string'
+          ? err
+          : (err as any)?.message ||
+            (err as any)?.code ||
+            (err ? JSON.stringify(err) : 'Nie udało się zalogować. Sprawdź poprawność danych.');
+      setErrorMessage(errorText);
     }
   };
 

@@ -26,6 +26,10 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const loadAllData = async () => {
     setIsLoading(true);
     try {
+      await librusClient.checkSavedSession();
+      const demo = librusClient.isDemo();
+      setIsDemo(demo);
+
       const [stu, grd, tt] = await Promise.all([
         librusClient.getStudentInfo(),
         librusClient.getGrades(),
@@ -34,7 +38,6 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setStudent(stu);
       setGrades(grd);
       setTimetable(tt);
-      setIsDemo(librusClient.isDemo());
     } catch (err) {
       console.error('Failed to load Librus data', err);
     } finally {
