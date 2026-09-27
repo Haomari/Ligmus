@@ -16,6 +16,10 @@ export default function HomeScreen() {
   const router = useRouter();
   const { student, grades, timetable, isDemo, isLoading, refreshData } = useLibrus();
 
+	console.log("student", student);
+	console.log("grades", grades);
+	console.log("timetable", timetable);
+
   // Get current day's first lessons (e.g. Monday/Day 1)
   const todaySchedule = timetable[0];
   const nextLesson = todaySchedule?.lessons?.[0];
@@ -105,11 +109,6 @@ export default function HomeScreen() {
             </View>
             <View style={styles.luckyTextCol}>
               <Text style={styles.luckyTitle}>Szczęśliwy Numerek</Text>
-              <Text style={styles.luckySubtitle}>
-                {isUserLucky
-                  ? 'To Twój numerek! Brak pytań z ławki!'
-                  : `Dzisiaj nie pytamy numerka: ${student?.luckyNumber}`}
-              </Text>
             </View>
             <View style={styles.luckyNumberBadge}>
               <Text style={styles.luckyNumberValue}>{student?.luckyNumber ?? '--'}</Text>

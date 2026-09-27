@@ -1,5 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
-import { DaySchedule, StudentInfo, SubjectGrades } from '@/types/librus';
+import { DaySchedule, Grade, StudentInfo, SubjectGrades } from '@/types/librus';
 import { mockStudentInfo, mockSubjects, mockTimetable } from './mockData';
 
 const STORAGE_KEYS = {
@@ -386,60 +386,159 @@ class LibrusClient {
       const res = await this.doFetch('https://synergia.librus.pl/przegladaj_oceny/uczen');
       const html = await res.text();
 
-      // Lightweight HTML parser for subjects in the grades table
       const subjects: SubjectGrades[] = [];
-      const trMatches = html.match(/<tr[^>]*class="line[01]"[^>]*>[\s\S]*?<\/tr>/gi) || [];
+      // Match only top-level subject rows: line0/line1 without name="przedmioty_all"
+      const trMatches =
+        html.match(/<tr(?![^>]*\bname="przedmioty_all")[^>]*class="[^"]*line[01][^"]*"[^>]*>[\s\S]*?<\/tr>/gi) || [];
 
       let idCounter = 1;
+
       for (const row of trMatches) {
-        const tdMatches = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-        if (tdMatches.length < 3) continue;
+        // Extract <td> elements
+        const tdMatches = [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1]);
+        if (tdMatches.length < 10) continue;
 
-        const subjectRaw = tdMatches[1].replace(/<[^>]+>/g, '').trim();
-        if (!subjectRaw) continue;
+        const subjectName = tdMatches[1].replace(/<[^>]+>/g, '').trim();
+        // Ignore ghost rows, sub-headers and zachowanie
+        if (!subjectName || subjectName === 'K' || subjectName.toLowerCase() === 'zachowanie') continue;
 
-        // Extract grade values in semester 1 (td[2]) and semester 2 (td[5])
-        const grades: any[] = [];
-        const extractBoxes = (tdHtml: string, semesterNum: 1 | 2) => {
-          const boxMatches = tdHtml.match(/<span class="grade-box"[^>]*>[\s\S]*?<\/span>/gi) || [];
-          for (const box of boxMatches) {
-            const valMatch = box.match(/<a[^>]*>([^<]+)<\/a>/i);
-            const val = valMatch ? valMatch[1].trim().replace(/\*+$/, '') : '';
-            if (val) {
-              grades.push({
-                id: `grade-${idCounter++}`,
-                value: val,
-                numericValue: parseFloat(val) || 0,
-                weight: 1,
-                category: 'Bieżąca',
-                date: new Date().toISOString().split('T')[0],
-                semester: semesterNum,
-              });
-            }
+        const grades: Grade[] = [];
+
+        const parseSemester = (tdHtml: string, semesterNum: 1 | 2) => {
+          const spanMatches = [...tdHtml.matchAll(/<span\b[^>]*class="[^"]*grade-box[^"]*"[\s\S]*?<\/span>/gi)].map(
+            (m) => m[0]
+          );
+          for (const span of spanMatches) {
+            // Grade value is the text directly before </a>
+            const valMatch = span.match(/>\s*([^<>]+?)\s*<\/a>/i);
+            if (!valMatch) continue;
+
+            const val = valMatch[1].trim().replace(/\*+$/, '');
+            if (!val) continue;
+
+            const hrefMatch = span.match(/href="[^"]*\/(\d+)"/i);
+            const gradeId = hrefMatch ? hrefMatch[1] : `gen-${idCounter++}`;
+
+            const titleMatch = span.match(/title="([^"]*)"/i);
+            const title = titleMatch ? titleMatch[1] : '';
+
+            const getField = (field: string) => {
+              const m = title.match(new RegExp(`${field}:\\s*([^<]+)`, 'i'));
+              return m ? m[1].trim() : '';
+            };
+
+            const category = getField('Kategoria') || 'Bieżąca';
+            const dateRaw = getField('Data');
+            const date = dateRaw ? dateRaw.split(' ')[0] : new Date().toISOString().split('T')[0];
+            const teacher = getField('Nauczyciel') || undefined;
+            const weightStr = getField('Waga');
+            const weight = weightStr ? parseFloat(weightStr) || 1 : 1;
+            const comment = getField('Komentarz') || undefined;
+
+            grades.push({
+              id: gradeId,
+              value: val,
+              numericValue: parseFloat(val) || 0,
+              weight,
+              category,
+              date,
+              teacher,
+              comment,
+              semester: semesterNum,
+            });
           }
         };
 
-        if (tdMatches[2]) extractBoxes(tdMatches[2], 1);
-        if (tdMatches[5]) extractBoxes(tdMatches[5], 2);
+        // Col 2 = Sem 1 grades, Col 5 = Sem 2 grades
+        parseSemester(tdMatches[2], 1);
+        parseSemester(tdMatches[5], 2);
 
-        // Average
-        const sem1Avg = parseFloat(tdMatches[4]?.replace(/<[^>]+>/g, '') || '') || null;
-        const sem2Avg = parseFloat(tdMatches[7]?.replace(/<[^>]+>/g, '') || '') || null;
-        const yearAvg = parseFloat(tdMatches[9]?.replace(/<[^>]+>/g, '') || '') || null;
+        const parseAvg = (td: string | undefined) => {
+          const text = (td || '').replace(/<[^>]+>/g, '').trim();
+          const num = parseFloat(text);
+          return isNaN(num) ? null : num;
+        };
+
+        const averageSem1 = parseAvg(tdMatches[3]);
+        const averageSem2 = parseAvg(tdMatches[6]);
+        const yearAverage = parseAvg(tdMatches[8]);
 
         subjects.push({
           id: `subj-${idCounter++}`,
-          subjectName: subjectRaw,
-          averageSem1: sem1Avg,
-          averageSem2: sem2Avg,
-          yearAverage: yearAvg,
+          subjectName,
+          averageSem1,
+          averageSem2,
+          yearAverage,
           grades,
         });
       }
 
+      console.log(`[getGrades] Successfully parsed ${subjects.length} subjects with ${subjects.flatMap(s => s.grades).length} total grades.`);
       return subjects.length > 0 ? subjects : mockSubjects;
-    } catch {
+    } catch (err) {
+      console.error('[getGrades] error:', err);
       return mockSubjects;
+    }
+  }
+
+  /**
+   * Fetch full details for a single grade from its detail page.
+   * The detail page at /przegladaj_oceny/szczegoly/{id} contains a table
+   * with rows for: Ocena, Kategoria, Data, Nauczyciel, Lekcja, Waga, Komentarz, etc.
+   */
+  private async fetchGradeDetail(gradeId: string): Promise<{
+    weight?: number;
+    category?: string;
+    date?: string;
+    teacher?: string;
+    comment?: string;
+  } | null> {
+    try {
+      const res = await this.doFetch(
+        `https://synergia.librus.pl/przegladaj_oceny/szczegoly/${gradeId}`
+      );
+      const html = await res.text();
+
+      /**
+       * Parse a <th>label</th><td>value</td> row from the details table.
+       * Librus uses both <th> and <td> label cells depending on the page variant.
+       */
+      const parseRow = (label: string): string | null => {
+        const regex = new RegExp(
+          `<t[hd][^>]*>\\s*${label}[^<]*<\\/t[hd]>\\s*<td[^>]*>([\\s\\S]*?)<\\/td>`,
+          'i'
+        );
+        const match = html.match(regex);
+        if (!match) return null;
+        return match[1]
+          .replace(/<br\s*\/?>/gi, ' ')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&nbsp;?/g, ' ')
+          .trim();
+      };
+
+      const category = parseRow('Kategoria') ?? parseRow('Typ') ?? 'Bieżąca';
+      const dateRaw = parseRow('Data') ?? parseRow('Dodany') ?? '';
+      const weightRaw = parseRow('Waga');
+      const teacher = parseRow('Nauczyciel') ?? parseRow('Dodał') ?? undefined;
+      const comment = parseRow('Komentarz') ?? undefined;
+
+      // Normalize date from DD.MM.YYYY → YYYY-MM-DD if needed
+      let date = dateRaw;
+      const ddmmyyyy = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+      if (ddmmyyyy) {
+        date = `${ddmmyyyy[3]}-${ddmmyyyy[2]}-${ddmmyyyy[1]}`;
+      }
+
+      return {
+        category: category || 'Bieżąca',
+        date: date || new Date().toISOString().split('T')[0],
+        weight: weightRaw ? (parseFloat(weightRaw) || 1) : 1,
+        teacher: teacher || undefined,
+        comment: comment || undefined,
+      };
+    } catch {
+      return null;
     }
   }
 

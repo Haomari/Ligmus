@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const Librus = require('librus-api');
 
 async function testApi() {
@@ -5,8 +7,15 @@ async function testApi() {
   console.log('       LIBRUS API VERIFICATION TEST          ');
   console.log('==============================================\n');
 
-  const login = '***';
-  const pass = '***';
+  const login = process.argv[2] || process.env.LIBRUS_LOGIN || '***';
+  const pass = process.argv[3] || process.env.LIBRUS_PASS || '***';
+
+  if (login === '***' || pass === '***') {
+    console.error('[!] Please provide your credentials:');
+    console.error('    node scripts/test_librus.js <login> <password>');
+    console.error('    or edit the login and pass variables in scripts/test_librus.js\n');
+    return;
+  }
 
   const client = new Librus();
 
@@ -74,9 +83,20 @@ async function testApi() {
     console.warn('[!] Could not fetch account info:', err.message);
   }
 
-  // 2. Grades
+  // 2. Raw HTML dump for safe offline testing
   try {
-    console.log('[Step 3] Fetching Grades...');
+    console.log('[Step 3] Fetching raw HTML of grades page (przegladaj_oceny/uczen)...');
+    const rawRes = await client.caller.get('https://synergia.librus.pl/przegladaj_oceny/uczen');
+    const dumpPath = path.join(__dirname, 'grades_dump.html');
+    fs.writeFileSync(dumpPath, rawRes.data, 'utf-8');
+    console.log(`[✓] Successfully saved raw HTML dump to: ${dumpPath}\n`);
+  } catch (err) {
+    console.warn('[!] Failed to dump raw HTML:', err.message);
+  }
+
+  // 3. Grades via librus-api
+  try {
+    console.log('[Step 4] Fetching Grades via librus-api...');
     const grades = await client.info.getGrades();
     console.log(`[✓] Retrieved ${grades?.length || 0} subjects.\n`);
 
