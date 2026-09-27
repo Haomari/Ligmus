@@ -120,17 +120,7 @@ export default function SettingsScreen() {
           <View style={styles.card}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Wersja</Text>
-              <Text style={styles.infoValue}>1.0.0 (Direct Mobile Edition)</Text>
-            </View>
-            <View style={styles.divider} />
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Prywatność</Text>
-              <Text style={styles.infoValue}>100% lokalnie na urządzeniu</Text>
-            </View>
-            <View style={styles.divider} />
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Serwer zewnętrzny</Text>
-              <Text style={styles.infoValue}>Brak (Zero-Server Architecture)</Text>
+              <Text style={styles.infoValue}>0.1.0</Text>
             </View>
           </View>
         </View>
