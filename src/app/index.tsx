@@ -14,11 +14,13 @@ import { useLibrus } from '@/context/LibrusContext';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { student, grades, timetable, isDemo, isLoading, refreshData } = useLibrus();
+  const { student, grades, timetable, isAuthenticated, isLoading, refreshData } = useLibrus();
 
-	console.log("student", student);
-	console.log("grades", grades);
-	console.log("timetable", timetable);
+  React.useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      router.replace('/login' as any);
+    }
+  }, [isLoading, isAuthenticated]);
 
   // Get current day's first lessons (e.g. Monday/Day 1)
   const todaySchedule = timetable[0];
@@ -29,8 +31,6 @@ export default function HomeScreen() {
     .flatMap((s) => s.grades.map((g) => ({ ...g, subjectName: s.subjectName })))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
     .slice(0, 4);
-
-  const isUserLucky = student && student.luckyNumber === student.studentNumber;
 
   const getGradeColor = (val: string) => {
     if (val.startsWith('6') || val.startsWith('5')) return '#10b981'; // Green
@@ -51,55 +51,17 @@ export default function HomeScreen() {
         {/* Header */}
         <View style={styles.header}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.greeting}>Cześć, {student?.name.split(' ')[0] || 'Uczniu'}! 👋</Text>
+            <Text style={styles.greeting}>Cześć, {student?.name ? student.name.split(' ')[0] : 'Uczniu'}! 👋</Text>
             <Text style={styles.subGreeting}>
               {student?.name ? `${student.name} • ` : ''}{student?.classGroup || 'Librus Synergia'}{student?.studentNumber ? ` • Nr ${student.studentNumber}` : ''}
             </Text>
           </View>
-          {isDemo ? (
-            <TouchableOpacity
-              style={styles.demoBadge}
-              onPress={() => router.push('/login' as any)}>
-              <Text style={styles.demoBadgeText}>Zaloguj (Demo)</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[styles.demoBadge, { borderColor: '#10b98150' }]}
-              onPress={() => router.push('/settings' as any)}>
-              <Text style={[styles.demoBadgeText, { color: '#10b981' }]}>Librus</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {isDemo && (
           <TouchableOpacity
-            style={[
-              styles.card,
-              {
-                backgroundColor: '#1e293b',
-                borderColor: '#38bdf8',
-                borderWidth: 1,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: 14,
-              },
-            ]}
-            onPress={() => router.push('/login' as any)}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-              <Ionicons name="log-in-outline" size={24} color="#38bdf8" />
-              <View>
-                <Text style={{ color: '#f8fafc', fontWeight: '700', fontSize: 15 }}>
-                  Zaloguj się do Librusa
-                </Text>
-                <Text style={{ color: '#94a3b8', fontSize: 12 }}>
-                  Wpisz login i hasło, aby zobaczyć swoje dane
-                </Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
+            style={styles.settingsIconButton}
+            onPress={() => router.push('/settings' as any)}>
+            <Ionicons name="settings-outline" size={22} color="#94a3b8" />
           </TouchableOpacity>
-        )}
+        </View>
 
         {/* Lucky Number Card */}
         <View style={[styles.card, styles.luckyCard]}>
@@ -141,7 +103,11 @@ export default function HomeScreen() {
             </View>
           ) : (
             <View style={[styles.card, styles.emptyCard]}>
-              <Text style={styles.emptyText}>Brak kolejnych lekcji na dzisiaj 🎉</Text>
+              <Ionicons name="calendar-outline" size={22} color="#64748b" style={{ marginBottom: 4 }} />
+              <Text style={styles.emptyText}>Plan lekcji w przygotowaniu</Text>
+              <Text style={{ color: '#64748b', fontSize: 12, marginTop: 2 }}>
+                Lekcje pojawią się tutaj po pobraniu planu.
+              </Text>
             </View>
           )}
         </View>
@@ -183,17 +149,6 @@ export default function HomeScreen() {
             ))}
           </View>
         </View>
-
-        {/* Quick Links / Info */}
-        <View style={[styles.card, styles.infoCard]}>
-          <Ionicons name="shield-checkmark" size={24} color="#3b82f6" />
-          <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={styles.infoTitle}>Ligmus - Twój prywatny Librus</Text>
-            <Text style={styles.infoDesc}>
-              Aplikacja łączy się bezpośrednio z Synergią. Twoje hasło i dane pozostają wyłącznie w pamięci telefonu.
-            </Text>
-          </View>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -225,18 +180,12 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginTop: 2,
   },
-  demoBadge: {
-    backgroundColor: '#3b82f620',
-    borderColor: '#3b82f6',
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+  settingsIconButton: {
+    padding: 8,
     borderRadius: 12,
-  },
-  demoBadgeText: {
-    color: '#60a5fa',
-    fontSize: 12,
-    fontWeight: '600',
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
   },
   card: {
     backgroundColor: '#1e293b',

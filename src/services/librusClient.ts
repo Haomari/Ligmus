@@ -1,12 +1,11 @@
 import * as SecureStore from 'expo-secure-store';
 import { DaySchedule, Grade, StudentInfo, SubjectGrades } from '@/types/librus';
-import { mockStudentInfo, mockSubjects, mockTimetable } from './mockData';
 
 const STORAGE_KEYS = {
   CREDENTIALS: 'ligmus_user_credentials',
-  IS_DEMO: 'ligmus_is_demo_mode',
-  STUDENT_INFO: 'ligmus_student_info',
   COOKIES: 'ligmus_saved_cookies',
+  STUDENT_INFO: 'ligmus_student_info',
+  GRADES_CACHE: 'ligmus_grades_cache',
 };
 
 function makeBannerHeader() {
@@ -70,8 +69,9 @@ class CookieStore {
 
 class LibrusClient {
   private cookieStore = new CookieStore();
-  private isDemoMode: boolean = true;
   private currentStudent: StudentInfo | null = null;
+  private cachedGrades: SubjectGrades[] = [];
+  private authenticated: boolean = false;
 
   constructor() {
     this.checkSavedSession();
@@ -99,41 +99,46 @@ class LibrusClient {
 
   async checkSavedSession(): Promise<boolean> {
     try {
-      const isDemo = await this.getStoredData(STORAGE_KEYS.IS_DEMO);
-      if (isDemo === 'false') {
-        this.isDemoMode = false;
-
-        // Restore cookies if available
-        const savedCookies = await this.getStoredData(STORAGE_KEYS.COOKIES);
-        if (savedCookies) {
-          try {
-            this.cookieStore.fromJSON(JSON.parse(savedCookies));
-          } catch {}
-        }
-
-        // Restore student info
-        const savedStudent = await this.getStoredData(STORAGE_KEYS.STUDENT_INFO);
-        if (savedStudent) {
-          try {
-            this.currentStudent = JSON.parse(savedStudent);
-          } catch {}
-        }
-
-        return true;
+      const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+      if (!credsRaw) {
+        this.authenticated = false;
+        return false;
       }
+
+      this.authenticated = true;
+
+      // Restore cookies if available
+      const savedCookies = await this.getStoredData(STORAGE_KEYS.COOKIES);
+      if (savedCookies) {
+        try {
+          this.cookieStore.fromJSON(JSON.parse(savedCookies));
+        } catch {}
+      }
+
+      // Restore cached student info
+      const savedStudent = await this.getStoredData(STORAGE_KEYS.STUDENT_INFO);
+      if (savedStudent) {
+        try {
+          this.currentStudent = JSON.parse(savedStudent);
+        } catch {}
+      }
+
+      // Restore cached grades
+      const savedGrades = await this.getStoredData(STORAGE_KEYS.GRADES_CACHE);
+      if (savedGrades) {
+        try {
+          this.cachedGrades = JSON.parse(savedGrades);
+        } catch {}
+      }
+
       return true;
     } catch {
-      return true;
+      return false;
     }
   }
 
-  isDemo(): boolean {
-    return this.isDemoMode;
-  }
-
-  setDemoMode(demo: boolean) {
-    this.isDemoMode = demo;
-    this.saveStoredData(STORAGE_KEYS.IS_DEMO, demo ? 'true' : 'false');
+  isLoggedIn(): boolean {
+    return this.authenticated;
   }
 
   private async doFetch(url: string, options: RequestInit = {}): Promise<Response> {
@@ -143,7 +148,6 @@ class LibrusClient {
       ...((options.headers as Record<string, string>) || {}),
     };
 
-    // If explicit cookies were captured (e.g. in test or Node), attach them.
     const customCookies = this.cookieStore.getNonDefaultCookiesString();
     if (customCookies) {
       headers['Cookie'] = customCookies;
@@ -160,19 +164,31 @@ class LibrusClient {
   }
 
   /**
-   * Log into Librus directly using verified OAuth flow or switch to Demo mode
+   * Silently re-authenticate using saved credentials if a session has expired.
+   */
+  private async reloginWithStoredCredentials(): Promise<boolean> {
+    try {
+      const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+      if (!credsRaw) return false;
+      const { login, pass } = JSON.parse(credsRaw);
+      if (!login || !pass) return false;
+
+      console.log('[LibrusClient] Session expired. Automatically re-logging in...');
+      const res = await this.login(login, pass);
+      return res.success;
+    } catch (err) {
+      console.warn('[LibrusClient] Silent relogin failed:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Log into Librus directly using verified OAuth flow
    */
   async login(
     login: string,
-    pass: string,
-    demo: boolean = false
+    pass: string
   ): Promise<{ success: boolean; error?: string }> {
-    if (demo) {
-      this.isDemoMode = true;
-      await this.saveStoredData(STORAGE_KEYS.IS_DEMO, 'true');
-      return { success: true };
-    }
-
     try {
       this.cookieStore.clear();
 
@@ -192,7 +208,9 @@ class LibrusClient {
         const r2 = await this.doFetch(authUrl, {
           headers: { Referer: 'https://synergia.librus.pl/loguj/portalRodzina' },
         });
-        loginPageUrl = r2.url || (r2.headers.get('location') ? new URL(r2.headers.get('location')!, authUrl).toString() : authUrl);
+        loginPageUrl =
+          r2.url ||
+          (r2.headers.get('location') ? new URL(r2.headers.get('location')!, authUrl).toString() : authUrl);
       }
 
       // Step 3: POST credentials
@@ -280,8 +298,7 @@ class LibrusClient {
         }
       }
 
-      this.isDemoMode = false;
-      await this.saveStoredData(STORAGE_KEYS.IS_DEMO, 'false');
+      this.authenticated = true;
       await this.saveStoredData(
         STORAGE_KEYS.CREDENTIALS,
         JSON.stringify({ login, pass })
@@ -310,21 +327,33 @@ class LibrusClient {
   async logout(): Promise<void> {
     this.cookieStore.clear();
     this.currentStudent = null;
+    this.cachedGrades = [];
+    this.authenticated = false;
     await this.deleteStoredData(STORAGE_KEYS.CREDENTIALS);
     await this.deleteStoredData(STORAGE_KEYS.COOKIES);
     await this.deleteStoredData(STORAGE_KEYS.STUDENT_INFO);
-    await this.saveStoredData(STORAGE_KEYS.IS_DEMO, 'true');
-    this.isDemoMode = true;
+    await this.deleteStoredData(STORAGE_KEYS.GRADES_CACHE);
   }
 
-  async getStudentInfo(): Promise<StudentInfo> {
-    if (this.isDemoMode) {
-      return mockStudentInfo;
+  async getStudentInfo(): Promise<StudentInfo | null> {
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) {
+      return null;
     }
 
-    try {
+    const fetchInfo = async (): Promise<StudentInfo | null> => {
       const res = await this.doFetch('https://synergia.librus.pl/informacja');
       const html = await res.text();
+
+      // Check if session expired
+      if (
+        res.url.includes('login') ||
+        res.url.includes('OAuth') ||
+        html.includes('action="login"') ||
+        html.includes('Zaloguj do systemu')
+      ) {
+        return null;
+      }
 
       const parseRow = (label: string) => {
         const regex = new RegExp(
@@ -339,7 +368,9 @@ class LibrusClient {
       const name =
         parseRow('Imię i nazwisko ucznia') ||
         parseRow('Imię i nazwisko użytkownika') ||
-        'Uczeń';
+        '';
+      if (!name) return null;
+
       const classGroup = parseRow('Klasa') || '';
       const studentNumStr = parseRow('Nr w dzienniku') || '0';
       const educator = parseRow('Wychowawca') || '';
@@ -369,37 +400,54 @@ class LibrusClient {
       this.currentStudent = student;
       await this.saveStoredData(STORAGE_KEYS.STUDENT_INFO, JSON.stringify(student));
       return student;
-    } catch (err) {
-      if (this.currentStudent) {
-        return this.currentStudent;
+    };
+
+    try {
+      let student = await fetchInfo();
+      // If session expired, auto re-login and retry
+      if (!student) {
+        const relogged = await this.reloginWithStoredCredentials();
+        if (relogged) {
+          student = await fetchInfo();
+        }
       }
-      return mockStudentInfo;
+      return student || this.currentStudent;
+    } catch {
+      return this.currentStudent;
     }
   }
 
   async getGrades(): Promise<SubjectGrades[]> {
-    if (this.isDemoMode) {
-      return mockSubjects;
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) {
+      return [];
     }
 
-    try {
+    const fetchGradesHtml = async (): Promise<SubjectGrades[] | null> => {
       const res = await this.doFetch('https://synergia.librus.pl/przegladaj_oceny/uczen');
       const html = await res.text();
 
+      // Check if session expired
+      if (
+        res.url.includes('login') ||
+        res.url.includes('OAuth') ||
+        html.includes('action="login"') ||
+        html.includes('Zaloguj do systemu')
+      ) {
+        return null;
+      }
+
       const subjects: SubjectGrades[] = [];
-      // Match only top-level subject rows: line0/line1 without name="przedmioty_all"
       const trMatches =
         html.match(/<tr(?![^>]*\bname="przedmioty_all")[^>]*class="[^"]*line[01][^"]*"[^>]*>[\s\S]*?<\/tr>/gi) || [];
 
       let idCounter = 1;
 
       for (const row of trMatches) {
-        // Extract <td> elements
         const tdMatches = [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1]);
         if (tdMatches.length < 10) continue;
 
         const subjectName = tdMatches[1].replace(/<[^>]+>/g, '').trim();
-        // Ignore ghost rows, sub-headers and zachowanie
         if (!subjectName || subjectName === 'K' || subjectName.toLowerCase() === 'zachowanie') continue;
 
         const grades: Grade[] = [];
@@ -409,7 +457,6 @@ class LibrusClient {
             (m) => m[0]
           );
           for (const span of spanMatches) {
-            // Grade value is the text directly before </a>
             const valMatch = span.match(/>\s*([^<>]+?)\s*<\/a>/i);
             if (!valMatch) continue;
 
@@ -449,7 +496,6 @@ class LibrusClient {
           }
         };
 
-        // Col 2 = Sem 1 grades, Col 5 = Sem 2 grades
         parseSemester(tdMatches[2], 1);
         parseSemester(tdMatches[5], 2);
 
@@ -473,80 +519,32 @@ class LibrusClient {
         });
       }
 
-      console.log(`[getGrades] Successfully parsed ${subjects.length} subjects with ${subjects.flatMap(s => s.grades).length} total grades.`);
-      return subjects.length > 0 ? subjects : mockSubjects;
-    } catch (err) {
-      console.error('[getGrades] error:', err);
-      return mockSubjects;
-    }
-  }
-
-  /**
-   * Fetch full details for a single grade from its detail page.
-   * The detail page at /przegladaj_oceny/szczegoly/{id} contains a table
-   * with rows for: Ocena, Kategoria, Data, Nauczyciel, Lekcja, Waga, Komentarz, etc.
-   */
-  private async fetchGradeDetail(gradeId: string): Promise<{
-    weight?: number;
-    category?: string;
-    date?: string;
-    teacher?: string;
-    comment?: string;
-  } | null> {
-    try {
-      const res = await this.doFetch(
-        `https://synergia.librus.pl/przegladaj_oceny/szczegoly/${gradeId}`
-      );
-      const html = await res.text();
-
-      /**
-       * Parse a <th>label</th><td>value</td> row from the details table.
-       * Librus uses both <th> and <td> label cells depending on the page variant.
-       */
-      const parseRow = (label: string): string | null => {
-        const regex = new RegExp(
-          `<t[hd][^>]*>\\s*${label}[^<]*<\\/t[hd]>\\s*<td[^>]*>([\\s\\S]*?)<\\/td>`,
-          'i'
-        );
-        const match = html.match(regex);
-        if (!match) return null;
-        return match[1]
-          .replace(/<br\s*\/?>/gi, ' ')
-          .replace(/<[^>]+>/g, '')
-          .replace(/&nbsp;?/g, ' ')
-          .trim();
-      };
-
-      const category = parseRow('Kategoria') ?? parseRow('Typ') ?? 'Bieżąca';
-      const dateRaw = parseRow('Data') ?? parseRow('Dodany') ?? '';
-      const weightRaw = parseRow('Waga');
-      const teacher = parseRow('Nauczyciel') ?? parseRow('Dodał') ?? undefined;
-      const comment = parseRow('Komentarz') ?? undefined;
-
-      // Normalize date from DD.MM.YYYY → YYYY-MM-DD if needed
-      let date = dateRaw;
-      const ddmmyyyy = dateRaw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
-      if (ddmmyyyy) {
-        date = `${ddmmyyyy[3]}-${ddmmyyyy[2]}-${ddmmyyyy[1]}`;
+      if (subjects.length > 0) {
+        this.cachedGrades = subjects;
+        await this.saveStoredData(STORAGE_KEYS.GRADES_CACHE, JSON.stringify(subjects));
       }
 
-      return {
-        category: category || 'Bieżąca',
-        date: date || new Date().toISOString().split('T')[0],
-        weight: weightRaw ? (parseFloat(weightRaw) || 1) : 1,
-        teacher: teacher || undefined,
-        comment: comment || undefined,
-      };
+      return subjects;
+    };
+
+    try {
+      let subjects = await fetchGradesHtml();
+      // If session expired, auto re-login and retry
+      if (!subjects) {
+        const relogged = await this.reloginWithStoredCredentials();
+        if (relogged) {
+          subjects = await fetchGradesHtml();
+        }
+      }
+      return (subjects && subjects.length > 0) ? subjects : this.cachedGrades;
     } catch {
-      return null;
+      return this.cachedGrades;
     }
   }
 
   async getTimetable(): Promise<DaySchedule[]> {
-    if (this.isDemoMode) {
-      return mockTimetable;
-    }
-    return mockTimetable;
+    // Real timetable scraper placeholder: returns clean empty array for now
+    return [];
   }
 }
 

@@ -14,12 +14,12 @@ import { useLibrus } from '@/context/LibrusContext';
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { student, isDemo, isLoading, refreshData, logout } = useLibrus();
+  const { student, isLoading, refreshData, logout } = useLibrus();
 
   const handleLogout = () => {
     Alert.alert(
       'Wylogowanie',
-      'Czy na pewno chcesz się wylogować i zresetować zapisaną sesję?',
+      'Czy na pewno chcesz się wylogować ze swojego konta Librus?',
       [
         { text: 'Anuluj', style: 'cancel' },
         {
@@ -27,7 +27,7 @@ export default function SettingsScreen() {
           style: 'destructive',
           onPress: async () => {
             await logout();
-            Alert.alert('Wylogowano', 'Powrócono do trybu demonstracyjnego.');
+            router.replace('/login' as any);
           },
         },
       ]
@@ -51,10 +51,12 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.profileInfo}>
               <Text style={styles.studentName}>{student?.name || 'Uczeń'}</Text>
-              <Text style={styles.studentClass}>{student?.classGroup}</Text>
-              <Text style={styles.studentMeta}>
-                Wychowawca: {student?.educator}
-              </Text>
+              <Text style={styles.studentClass}>{student?.classGroup || 'Konto Librus'}</Text>
+              {student?.educator ? (
+                <Text style={styles.studentMeta}>
+                  Wychowawca: {student.educator}
+                </Text>
+              ) : null}
             </View>
           </View>
         </View>
@@ -64,35 +66,11 @@ export default function SettingsScreen() {
           <Text style={styles.sectionHeader}>Konto i połączenie</Text>
 
           <View style={styles.card}>
-            <View style={styles.settingRow}>
-              <View style={styles.settingIconContainer}>
-                <Ionicons
-                  name={isDemo ? 'flask-outline' : 'checkmark-circle-outline'}
-                  size={22}
-                  color={isDemo ? '#f59e0b' : '#10b981'}
-                />
-              </View>
-              <View style={styles.settingTextCol}>
-                <Text style={styles.settingTitle}>
-                  {isDemo ? 'Aktywny Tryb Demo' : 'Połączono z Librus Synergia'}
-                </Text>
-                <Text style={styles.settingDesc}>
-                  {isDemo
-                    ? 'Wyświetlasz przykładowe dane demonstracyjne.'
-                    : 'Aplikacja pobiera Twoje rzeczywiste oceny i plan.'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.divider} />
-
             <TouchableOpacity
               style={styles.actionRow}
               onPress={() => router.push('/login' as any)}>
               <Ionicons name="key-outline" size={20} color="#38bdf8" />
-              <Text style={styles.actionText}>
-                {isDemo ? 'Zaloguj się swoim kontem Librus' : 'Zmień konto / Zaloguj ponownie'}
-              </Text>
+              <Text style={styles.actionText}>Zmień konto / Zaloguj ponownie</Text>
               <Ionicons name="chevron-forward" size={18} color="#64748b" />
             </TouchableOpacity>
 
@@ -128,7 +106,7 @@ export default function SettingsScreen() {
         {/* Logout Button */}
         <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
           <Ionicons name="log-out-outline" size={20} color="#ef4444" />
-          <Text style={styles.logoutButtonText}>Wyczyść sesję i zresetuj</Text>
+          <Text style={styles.logoutButtonText}>Wyloguj się z Librusa</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

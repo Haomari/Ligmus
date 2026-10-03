@@ -29,7 +29,7 @@ export default function LoginScreen() {
       return;
     }
     setErrorMessage(null);
-    const res = await login(username.trim(), password.trim(), false);
+    const res = await login(username.trim(), password.trim());
     if (res.success) {
       router.replace('/');
     } else {
@@ -44,22 +44,11 @@ export default function LoginScreen() {
     }
   };
 
-  const handleDemoLogin = async () => {
-    setErrorMessage(null);
-    await login('demo', 'demo', true);
-    router.replace('/');
-  };
-
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView
         style={styles.keyboardView}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        {/* Back Button */}
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color="#f8fafc" />
-        </TouchableOpacity>
-
         <View style={styles.content}>
           <View style={styles.header}>
             <View style={styles.logoBadge}>
@@ -83,7 +72,7 @@ export default function LoginScreen() {
               <Ionicons name="person-outline" size={20} color="#94a3b8" style={styles.inputIcon} />
               <TextInput
                 style={styles.input}
-                placeholder="Login (np. 1234567u)"
+                placeholder="Login (np. 67monster)"
                 placeholderTextColor="#64748b"
                 value={username}
                 onChangeText={setUsername}
@@ -123,17 +112,6 @@ export default function LoginScreen() {
               ) : (
                 <Text style={styles.loginButtonText}>Zaloguj do Librusa</Text>
               )}
-            </TouchableOpacity>
-
-            <View style={styles.orDivider}>
-              <View style={styles.orLine} />
-              <Text style={styles.orText}>LUB</Text>
-              <View style={styles.orLine} />
-            </View>
-
-            <TouchableOpacity style={styles.demoButton} onPress={handleDemoLogin}>
-              <Ionicons name="sparkles" size={18} color="#38bdf8" />
-              <Text style={styles.demoButtonText}>Wypróbuj z danymi Demo</Text>
             </TouchableOpacity>
           </View>
 

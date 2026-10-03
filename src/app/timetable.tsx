@@ -25,74 +25,93 @@ export default function TimetableScreen() {
         <Text style={styles.headerDate}>{activeSchedule?.date || 'Ten tydzień'}</Text>
       </View>
 
-      {/* Days Selector */}
-      <View style={styles.daysRow}>
-        {timetable.map((day) => {
-          const isActive = day.dayId === selectedDayId;
-          return (
-            <TouchableOpacity
-              key={day.dayId}
-              style={[styles.dayTab, isActive && styles.dayTabActive]}
-              onPress={() => setSelectedDayId(day.dayId)}>
-              <Text style={[styles.dayShortName, isActive && styles.dayShortNameActive]}>
-                {day.shortName}
-              </Text>
-              <Text style={[styles.dayLessonsCount, isActive && styles.dayLessonsCountActive]}>
-                {day.lessons.length} lek.
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-
-      <ScrollView
-        contentContainerStyle={styles.listContainer}
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
-        }>
-        <View style={styles.dayBanner}>
-          <Ionicons name="calendar-outline" size={18} color="#38bdf8" />
-          <Text style={styles.dayBannerText}>
-            {activeSchedule?.dayName} • {activeSchedule?.lessons.length || 0} lekcji
-          </Text>
-        </View>
-
-        {activeSchedule?.lessons && activeSchedule.lessons.length > 0 ? (
-          activeSchedule.lessons.map((lesson: TimetableLesson) => (
-            <View key={lesson.id} style={styles.lessonCard}>
-              <View style={styles.timeBadgeCol}>
-                <View style={styles.hourNumberCircle}>
-                  <Text style={styles.hourNumberText}>{lesson.hourNumber}</Text>
-                </View>
-                <Text style={styles.timeSpanText}>{lesson.timeSpan}</Text>
-              </View>
-
-              <View style={styles.lessonInfoCol}>
-                <Text style={styles.subjectText}>{lesson.subject}</Text>
-                <View style={styles.metaRow}>
-                  <View style={styles.classroomBadge}>
-                    <Ionicons name="location-outline" size={13} color="#94a3b8" />
-                    <Text style={styles.classroomText}>{lesson.classroom}</Text>
-                  </View>
-                  <View style={styles.teacherBadge}>
-                    <Ionicons name="person-outline" size={13} color="#94a3b8" />
-                    <Text style={styles.teacherText}>{lesson.teacher}</Text>
-                  </View>
-                </View>
-              </View>
-            </View>
-          ))
-        ) : (
-          <View style={styles.emptyCard}>
-            <Ionicons name="sunny-outline" size={48} color="#94a3b8" />
-            <Text style={styles.emptyTitle}>Brak lekcji</Text>
+      {timetable.length === 0 ? (
+        <ScrollView
+          contentContainerStyle={[styles.listContainer, { flex: 1, justifyContent: 'center', alignItems: 'center' }]}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
+          }>
+          <View style={[styles.emptyCard, { paddingVertical: 40 }]}>
+            <Ionicons name="calendar-outline" size={54} color="#38bdf8" style={{ marginBottom: 12 }} />
+            <Text style={styles.emptyTitle}>Plan lekcji w przygotowaniu</Text>
             <Text style={styles.emptySubtitle}>
-              W tym dniu nie ma zaplanowanych zajęć szkolnych.
+              Pobieranie planu lekcji z serwera Synergia zostanie zintegrowane w kolejnym kroku.
             </Text>
           </View>
-        )}
-      </ScrollView>
+        </ScrollView>
+      ) : (
+        <>
+          {/* Days Selector */}
+          <View style={styles.daysRow}>
+            {timetable.map((day) => {
+              const isActive = day.dayId === selectedDayId;
+              return (
+                <TouchableOpacity
+                  key={day.dayId}
+                  style={[styles.dayTab, isActive && styles.dayTabActive]}
+                  onPress={() => setSelectedDayId(day.dayId)}>
+                  <Text style={[styles.dayShortName, isActive && styles.dayShortNameActive]}>
+                    {day.shortName}
+                  </Text>
+                  <Text style={[styles.dayLessonsCount, isActive && styles.dayLessonsCountActive]}>
+                    {day.lessons.length} lek.
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <ScrollView
+            contentContainerStyle={styles.listContainer}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
+            }>
+            <View style={styles.dayBanner}>
+              <Ionicons name="calendar-outline" size={18} color="#38bdf8" />
+              <Text style={styles.dayBannerText}>
+                {activeSchedule?.dayName} • {activeSchedule?.lessons.length || 0} lekcji
+              </Text>
+            </View>
+
+            {activeSchedule?.lessons && activeSchedule.lessons.length > 0 ? (
+              activeSchedule.lessons.map((lesson: TimetableLesson) => (
+                <View key={lesson.id} style={styles.lessonCard}>
+                  <View style={styles.timeBadgeCol}>
+                    <View style={styles.hourNumberCircle}>
+                      <Text style={styles.hourNumberText}>{lesson.hourNumber}</Text>
+                    </View>
+                    <Text style={styles.timeSpanText}>{lesson.timeSpan}</Text>
+                  </View>
+
+                  <View style={styles.lessonInfoCol}>
+                    <Text style={styles.subjectText}>{lesson.subject}</Text>
+                    <View style={styles.metaRow}>
+                      <View style={styles.classroomBadge}>
+                        <Ionicons name="location-outline" size={13} color="#94a3b8" />
+                        <Text style={styles.classroomText}>{lesson.classroom}</Text>
+                      </View>
+                      <View style={styles.teacherBadge}>
+                        <Ionicons name="person-outline" size={13} color="#94a3b8" />
+                        <Text style={styles.teacherText}>{lesson.teacher}</Text>
+                      </View>
+                    </View>
+                  </View>
+                </View>
+              ))
+            ) : (
+              <View style={styles.emptyCard}>
+                <Ionicons name="sunny-outline" size={48} color="#94a3b8" />
+                <Text style={styles.emptyTitle}>Brak lekcji</Text>
+                <Text style={styles.emptySubtitle}>
+                  W tym dniu nie ma zaplanowanych zajęć szkolnych.
+                </Text>
+              </View>
+            )}
+          </ScrollView>
+        </>
+      )}
     </SafeAreaView>
   );
 }
