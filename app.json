@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ligmus",
     "slug": "Ligmus",
-    "version": "0.1.0",
+    "version": "v0.2.0-alpha",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "ligmus",
