@@ -1,61 +1,74 @@
-## Get started
+# 📱 Aplikacja mobilna
 
-1. Matvii Truspal
+Aplikacja mobilna stworzona przy użyciu **Expo** i **React Native**.
 
+## 📦 Instalacja aplikacji na Androidzie
 
-# Welcome to your Expo app 👋
+Jeśli chcesz korzystać z gotowej aplikacji, nie musisz instalować Expo ani Node.js.
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Wystarczy pobrać plik **APK** i zainstalować go na telefonie z systemem Android.
 
-## Get started
+### 1. Pobierz plik APK
 
-1. Install dependencies
+Pobierz plik:
 
-   ```bash
-   npm install
-   ```
+**`app.apk`**
 
-2. Start the app
+Plik APK znajdziesz w sekcji **Releases** tego projektu lub w miejscu udostępnionym przez autora aplikacji.
 
-   ```bash
-   npx expo start
-   ```
+### 2. Otwórz pobrany plik
 
-In the output, you'll find options to open the app in a
+Po pobraniu pliku `app.apk` otwórz go na swoim telefonie.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+Android może wyświetlić komunikat informujący o instalacji aplikacji z nieznanego źródła.
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+### 3. Zezwól na instalację
 
-## Get a fresh project
+Jeśli pojawi się komunikat o blokadzie instalacji:
 
-When you're ready, run:
+1. Otwórz **Ustawienia**.
+2. Przejdź do ustawień dotyczących **instalowania nieznanych aplikacji**.
+3. Zezwól aplikacji, z której otwierasz plik APK, na instalowanie aplikacji.
+4. Wróć do pliku `app.apk`.
+5. Kliknij **Zainstaluj**.
 
+Po zakończeniu instalacji aplikacja pojawi się na liście aplikacji w telefonie.
+
+> ⚠️ Instaluj pliki APK tylko z zaufanego źródła.
+
+---
+
+## 💻 Uruchomienie projektu lokalnie
+
+Jeżeli chcesz uruchomić projekt i rozwijać aplikację, najpierw zainstaluj zależności:
+
+```bash
+npm install
+```
+
+Następnie uruchom expo
+```bash
+npx expo start
+```
+Po uruchomieniu pojawią się opcje uruchomienia aplikacji na:
+
+Android Emulator
+
+iOS Simulator
+
+Expo Go
+
+Development Build
+
+## 🔄 Reset projektu
+
+Aby wyczyścić projekt i rozpocząć pracę od podstaw:
 ```bash
 npm run reset-project
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
 
-### Other setup steps
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
 
-## Learn more
 
-To learn more about developing your project with Expo, look at the following resources:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
