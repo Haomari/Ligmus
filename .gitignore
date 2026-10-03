@@ -41,3 +41,9 @@ example
 # generated native folders
 /ios
 /android
+
+# generated files
+/android-sdk
+
+# test-scripts
+scripts/
