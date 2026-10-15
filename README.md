@@ -8,31 +8,11 @@ Jeśli chcesz korzystać z gotowej aplikacji, nie musisz instalować Expo ani No
 
 Wystarczy pobrać plik **APK** i zainstalować go na telefonie z systemem Android.
 
-### 1. Pobierz plik APK
+### Instalacja
 
-Pobierz plik:
+Pobierz plik ligmus.apk z sekcji Releases tego repozytorium GitHub i go otwórz.
 
-**`app.apk`**
-
-Plik APK znajdziesz w sekcji **Releases** tego projektu lub w miejscu udostępnionym przez autora aplikacji.
-
-### 2. Otwórz pobrany plik
-
-Po pobraniu pliku `app.apk` otwórz go na swoim telefonie.
-
-Android może wyświetlić komunikat informujący o instalacji aplikacji z nieznanego źródła.
-
-### 3. Zezwól na instalację
-
-Jeśli pojawi się komunikat o blokadzie instalacji:
-
-1. Otwórz **Ustawienia**.
-2. Przejdź do ustawień dotyczących **instalowania nieznanych aplikacji**.
-3. Zezwól aplikacji, z której otwierasz plik APK, na instalowanie aplikacji.
-4. Wróć do pliku `app.apk`.
-5. Kliknij **Zainstaluj**.
-
-Po zakończeniu instalacji aplikacja pojawi się na liście aplikacji w telefonie.
+W przypadku blokady systemu Android, zezwól w ustawieniach na instalację z nieznanych źródeł i zatwierdź instalację.
 
 ---
 
