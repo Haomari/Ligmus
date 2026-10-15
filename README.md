@@ -34,8 +34,6 @@ Jeśli pojawi się komunikat o blokadzie instalacji:
 
 Po zakończeniu instalacji aplikacja pojawi się na liście aplikacji w telefonie.
 
-> ⚠️ Instaluj pliki APK tylko z zaufanego źródła.
-
 ---
 
 ## 💻 Uruchomienie projektu lokalnie
