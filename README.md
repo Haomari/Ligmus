@@ -60,14 +60,6 @@ Expo Go
 
 Development Build
 
-## 🔄 Reset projektu
-
-Aby wyczyścić projekt i rozpocząć pracę od podstaw:
-```bash
-npm run reset-project
-```
-
-
 
 
 
