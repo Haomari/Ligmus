@@ -1,20 +1,89 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Alert,
+  Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
+import {
+  DEFAULT_SYNC_SETTINGS,
+  getSyncSettings,
+  isExpoGo,
+  requestNotificationPermissions,
+  saveSyncSettings,
+  sendTestNotification,
+  SyncSettings,
+} from '@/services/backgroundSync';
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { student, isLoading, refreshData, logout } = useLibrus();
+  const [syncSettings, setSyncSettings] = useState<SyncSettings>(DEFAULT_SYNC_SETTINGS);
+
+  useEffect(() => {
+    getSyncSettings().then(setSyncSettings);
+  }, []);
+
+  const handleToggleSync = async (enabled: boolean) => {
+    if (enabled && !isExpoGo) {
+      const granted = await requestNotificationPermissions();
+      if (!granted) {
+        Alert.alert(
+          'Brak uprawnień',
+          'Aplikacja wymaga uprawnień do powiadomień, aby móc informować Cię o nowych ocenach w tle.'
+        );
+        return;
+      }
+    }
+    const updated = { ...syncSettings, enabled };
+    setSyncSettings(updated);
+    await saveSyncSettings(updated);
+  };
+
+  const handleChangeInterval = async (intervalMinutes: number) => {
+    const updated = { ...syncSettings, intervalMinutes };
+    setSyncSettings(updated);
+    await saveSyncSettings(updated);
+  };
+
+  const handleToggleSmartHours = async (smartHoursEnabled: boolean) => {
+    const updated = { ...syncSettings, smartHoursEnabled };
+    setSyncSettings(updated);
+    await saveSyncSettings(updated);
+  };
+
+  const handleSendTestNotification = async () => {
+    if (isExpoGo) {
+      Alert.alert(
+        'Tryb Expo Go',
+        'Powiadomienia push oraz w tle wymagają dedykowanej paczki APK (komenda: npx expo run:android), z uwagi na ograniczenia modułów natywnych w Expo Go.'
+      );
+      return;
+    }
+    const granted = await requestNotificationPermissions();
+    if (!granted) {
+      Alert.alert(
+        'Brak uprawnień',
+        'Zezwól na powiadomienia w ustawieniach systemu, aby odebrać powiadomienie testowe.'
+      );
+      return;
+    }
+    const success = await sendTestNotification();
+    if (success) {
+      Alert.alert('Sukces', 'Wysłano testowe powiadomienie! Sprawdź pasek powiadomień.');
+    } else {
+      Alert.alert('Błąd', 'Nie udało się wysłać testowego powiadomienia.');
+    }
+  };
 
   const handleLogout = () => {
     Alert.alert(
@@ -40,7 +109,9 @@ export default function SettingsScreen() {
         <Text style={styles.headerTitle}>Ustawienia</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={[styles.container, { paddingBottom: Math.max(insets.bottom + 24, 40) }]}
+        showsVerticalScrollIndicator={false}>
         {/* Profile Card */}
         <View style={styles.card}>
           <View style={styles.avatarRow}>
@@ -91,6 +162,106 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* Smart Sync & Notifications */}
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>Powiadomienia i Smart Sync</Text>
+
+          {isExpoGo && (
+            <View style={styles.expoGoBanner}>
+              <Ionicons name="information-circle-outline" size={20} color="#38bdf8" />
+              <View style={styles.expoGoBannerTextCol}>
+                <Text style={styles.expoGoBannerTitle}>Tryb podglądu Expo Go</Text>
+                <Text style={styles.expoGoBannerDesc}>
+                  Konfiguracja interfejsu i ustawień jest aktywna. Wysyłanie powiadomień w tle wymaga własnej paczki APK (<Text style={styles.expoGoCode}>npx expo run:android</Text>).
+                </Text>
+              </View>
+            </View>
+          )}
+
+          <View style={styles.card}>
+            {/* Toggle Background Notifications */}
+            <View style={styles.switchRow}>
+              <View style={styles.switchTextCol}>
+                <Text style={styles.switchTitle}>Powiadomienia w tle</Text>
+                <Text style={styles.switchDesc}>
+                  Automatycznie sprawdza nowe oceny bez konieczności otwierania aplikacji
+                </Text>
+              </View>
+              <Switch
+                value={syncSettings.enabled}
+                onValueChange={handleToggleSync}
+                thumbColor={syncSettings.enabled ? '#38bdf8' : '#94a3b8'}
+                trackColor={{ false: '#334155', true: '#38bdf840' }}
+              />
+            </View>
+
+            {syncSettings.enabled && (
+              <>
+                <View style={styles.divider} />
+
+                {/* Interval Selector */}
+                <View style={styles.settingBlock}>
+                  <Text style={styles.settingLabel}>Częstotliwość sprawdzania</Text>
+                  <View style={styles.intervalOptionsRow}>
+                    {[
+                      { label: '15 min', val: 15 },
+                      { label: '30 min', val: 30 },
+                      { label: '1 godz.', val: 60 },
+                      { label: '2 godz.', val: 120 },
+                    ].map((opt) => (
+                      <TouchableOpacity
+                        key={opt.val}
+                        style={[
+                          styles.intervalChip,
+                          syncSettings.intervalMinutes === opt.val && styles.intervalChipActive,
+                        ]}
+                        onPress={() => handleChangeInterval(opt.val)}>
+                        <Text
+                          style={[
+                            styles.intervalChipText,
+                            syncSettings.intervalMinutes === opt.val &&
+                              styles.intervalChipTextActive,
+                          ]}>
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.divider} />
+
+                {/* Smart Hours Toggle */}
+                <View style={styles.switchRow}>
+                  <View style={styles.switchTextCol}>
+                    <Text style={styles.switchTitle}>Tryb szkolny (Smart Hours)</Text>
+                    <Text style={styles.switchDesc}>
+                      Sprawdza tylko w dni nauki (Pn–Pt, 07:30–18:00), oszczędzając baterię w nocy i w weekendy
+                    </Text>
+                  </View>
+                  <Switch
+                    value={syncSettings.smartHoursEnabled}
+                    onValueChange={handleToggleSmartHours}
+                    thumbColor={syncSettings.smartHoursEnabled ? '#38bdf8' : '#94a3b8'}
+                    trackColor={{ false: '#334155', true: '#38bdf840' }}
+                  />
+                </View>
+
+                <View style={styles.divider} />
+
+                {/* Test Notification Button */}
+                <TouchableOpacity
+                  style={styles.actionRow}
+                  onPress={handleSendTestNotification}>
+                  <Ionicons name="notifications-outline" size={20} color="#38bdf8" />
+                  <Text style={styles.actionText}>Wyślij testowe powiadomienie</Text>
+                  <Ionicons name="chevron-forward" size={18} color="#64748b" />
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+
         {/* Privacy & App Info */}
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>O aplikacji Ligmus</Text>
@@ -98,7 +269,7 @@ export default function SettingsScreen() {
           <View style={styles.card}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Wersja</Text>
-              <Text style={styles.infoValue}>v0.2.0-alpha</Text>
+              <Text style={styles.infoValue}>v0.3.0-alpha</Text>
             </View>
           </View>
         </View>
@@ -261,5 +432,90 @@ const styles = StyleSheet.create({
     color: '#ef4444',
     fontSize: 15,
     fontWeight: '700',
+  },
+  switchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  switchTextCol: {
+    flex: 1,
+  },
+  switchTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f8fafc',
+  },
+  switchDesc: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  settingBlock: {
+    gap: 8,
+  },
+  settingLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#94a3b8',
+  },
+  intervalOptionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  intervalChip: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  intervalChipActive: {
+    backgroundColor: '#38bdf820',
+    borderColor: '#38bdf8',
+  },
+  intervalChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#94a3b8',
+  },
+  intervalChipTextActive: {
+    color: '#38bdf8',
+    fontWeight: '700',
+  },
+  expoGoBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#0369a120',
+    borderWidth: 1,
+    borderColor: '#38bdf840',
+    borderRadius: 12,
+    padding: 12,
+    gap: 10,
+    marginBottom: 10,
+  },
+  expoGoBannerTextCol: {
+    flex: 1,
+    gap: 2,
+  },
+  expoGoBannerTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#38bdf8',
+  },
+  expoGoBannerDesc: {
+    fontSize: 12,
+    color: '#cbd5e1',
+    lineHeight: 16,
+  },
+  expoGoCode: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: '#38bdf8',
+    fontWeight: '600',
   },
 });

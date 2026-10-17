@@ -1,284 +1,268 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ScrollView,
+  ActivityIndicator,
+  FlatList,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   StyleSheet,
   Text,
-  TouchableOpacity,
+  useWindowDimensions,
   View,
-  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
 import { useLibrus } from '@/context/LibrusContext';
-import { TimetableLesson } from '@/types/librus';
+import { DaySchedule, TimetableLesson } from '@/types/librus';
+import {
+  POLISH_DAY_NAMES,
+  POLISH_DAY_SHORT,
+  addDays,
+  formatPolishDayHeader,
+  getInitialSchoolDate,
+  getMonday,
+  getSchoolDayIndex,
+  parseISODate,
+  toISODate,
+} from '@/utils/dates';
+import { TimeGrid } from '@/components/timetable/TimeGrid';
+import { DayBar } from '@/components/timetable/DayBar';
+import { LessonDetailsModal } from '@/components/lesson-details-modal';
+
+function buildEmptyWeekDays(weekStartIso: string): DaySchedule[] {
+  const mon = parseISODate(weekStartIso);
+  return Array.from({ length: 5 }, (_, idx) => {
+    const d = addDays(mon, idx);
+    return {
+      dayId: idx + 1,
+      dayName: POLISH_DAY_NAMES[idx],
+      shortName: POLISH_DAY_SHORT[idx],
+      date: toISODate(d),
+      lessons: [],
+    };
+  });
+}
 
 export default function TimetableScreen() {
-  const { timetable, isLoading, refreshData } = useLibrus();
-  const [selectedDayId, setSelectedDayId] = useState<number>(1); // Default to Monday
+  const { width: SCREEN_WIDTH } = useWindowDimensions();
+  const { weeks, loadWeek, isLoading, isRefreshing, refreshData } = useLibrus();
 
-  const activeSchedule = timetable.find((t) => t.dayId === selectedDayId) || timetable[0];
+  const todayIso = useMemo(() => toISODate(new Date()), []);
+  const initialSchoolDate = useMemo(() => getInitialSchoolDate(new Date()), []);
+  const initialWeekStart = useMemo(
+    () => toISODate(getMonday(initialSchoolDate)),
+    [initialSchoolDate]
+  );
+  const initialDayIndex = useMemo(
+    () => getSchoolDayIndex(initialSchoolDate),
+    [initialSchoolDate]
+  );
+
+  const [activeWeekStart, setActiveWeekStart] = useState<string>(initialWeekStart);
+  const [selectedDayIndex, setSelectedDayIndex] = useState<number>(initialDayIndex);
+  const [isFetchingWeek, setIsFetchingWeek] = useState<boolean>(false);
+  const [modalLessonIndex, setModalLessonIndex] = useState<number | null>(null);
+
+  const pagerRef = useRef<FlatList<DaySchedule>>(null);
+  const selectedDayIndexRef = useRef<number>(initialDayIndex);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ensureWeek = async () => {
+      if (!weeks[activeWeekStart]) {
+        setIsFetchingWeek(true);
+      }
+      await loadWeek(activeWeekStart, false);
+      if (!cancelled) {
+        setIsFetchingWeek(false);
+      }
+    };
+    ensureWeek();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWeekStart, loadWeek]);
+
+  const activeWeekDays = useMemo(() => {
+    const wk = weeks[activeWeekStart];
+    if (wk && wk.days && wk.days.length === 5) {
+      return wk.days;
+    }
+    return buildEmptyWeekDays(activeWeekStart);
+  }, [weeks, activeWeekStart]);
+
+  const activeDay = activeWeekDays[selectedDayIndex] ?? activeWeekDays[0];
+  const headerDateLabel = activeDay?.date
+    ? formatPolishDayHeader(activeDay.date)
+    : activeDay?.dayName ?? '';
+
+  const selectDay = useCallback(
+    (index: number, animated: boolean = true) => {
+      const clamped = Math.min(Math.max(index, 0), 4);
+      selectedDayIndexRef.current = clamped;
+      setSelectedDayIndex(clamped);
+      pagerRef.current?.scrollToOffset({
+        offset: clamped * SCREEN_WIDTH,
+        animated,
+      });
+    },
+    [SCREEN_WIDTH]
+  );
+
+  const handlePagerMomentumEnd = (
+    e: NativeSyntheticEvent<NativeScrollEvent>
+  ) => {
+    const offsetX = e.nativeEvent.contentOffset.x;
+    const idx = Math.min(
+      Math.max(Math.round(offsetX / SCREEN_WIDTH), 0),
+      4
+    );
+    if (idx !== selectedDayIndexRef.current) {
+      selectedDayIndexRef.current = idx;
+      setSelectedDayIndex(idx);
+    }
+  };
+
+  const handlePrevWeek = () => {
+    const prevMon = addDays(parseISODate(activeWeekStart), -7);
+    setActiveWeekStart(toISODate(prevMon));
+  };
+
+  const handleNextWeek = () => {
+    const nextMon = addDays(parseISODate(activeWeekStart), 7);
+    setActiveWeekStart(toISODate(nextMon));
+  };
+
+  const handleJumpToToday = () => {
+    setActiveWeekStart(initialWeekStart);
+    selectDay(initialDayIndex, true);
+  };
+
+  const handleRefresh = async () => {
+    setIsFetchingWeek(true);
+    await Promise.all([refreshData(), loadWeek(activeWeekStart, true)]);
+    setIsFetchingWeek(false);
+  };
+
+  const handlePressLesson = (_lesson: TimetableLesson, index: number) => {
+    setModalLessonIndex(index);
+  };
+
+  const showInitialSpinner =
+    (isLoading || isFetchingWeek) && !weeks[activeWeekStart];
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Plan lekcji</Text>
-        <Text style={styles.headerDate}>{activeSchedule?.date || 'Ten tydzień'}</Text>
+        <View>
+          <Text style={styles.headerTitle}>Plan lekcji</Text>
+          <Text style={styles.headerSubtitle}>{headerDateLabel}</Text>
+        </View>
+        {(isRefreshing || isFetchingWeek) && (
+          <ActivityIndicator size="small" color="#3b82f6" />
+        )}
       </View>
 
-      {timetable.length === 0 ? (
-        <ScrollView
-          contentContainerStyle={[styles.listContainer, { flex: 1, justifyContent: 'center', alignItems: 'center' }]}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
-          }>
-          <View style={[styles.emptyCard, { paddingVertical: 40 }]}>
-            <Ionicons name="calendar-outline" size={54} color="#38bdf8" style={{ marginBottom: 12 }} />
-            <Text style={styles.emptyTitle}>Plan lekcji w przygotowaniu</Text>
-            <Text style={styles.emptySubtitle}>
-              Pobieranie planu lekcji z serwera Synergia zostanie zintegrowane w kolejnym kroku.
-            </Text>
-          </View>
-        </ScrollView>
+      {/* Main Content / 5-Day Horizontal Pager */}
+      {showInitialSpinner ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#3b82f6" />
+          <Text style={styles.loadingText}>Pobieranie planu lekcji...</Text>
+        </View>
       ) : (
-        <>
-          {/* Days Selector */}
-          <View style={styles.daysRow}>
-            {timetable.map((day) => {
-              const isActive = day.dayId === selectedDayId;
-              return (
-                <TouchableOpacity
-                  key={day.dayId}
-                  style={[styles.dayTab, isActive && styles.dayTabActive]}
-                  onPress={() => setSelectedDayId(day.dayId)}>
-                  <Text style={[styles.dayShortName, isActive && styles.dayShortNameActive]}>
-                    {day.shortName}
-                  </Text>
-                  <Text style={[styles.dayLessonsCount, isActive && styles.dayLessonsCountActive]}>
-                    {day.lessons.length} lek.
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          <ScrollView
-            contentContainerStyle={styles.listContainer}
-            showsVerticalScrollIndicator={false}
-            refreshControl={
-              <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
-            }>
-            <View style={styles.dayBanner}>
-              <Ionicons name="calendar-outline" size={18} color="#38bdf8" />
-              <Text style={styles.dayBannerText}>
-                {activeSchedule?.dayName} • {activeSchedule?.lessons.length || 0} lekcji
-              </Text>
+        <FlatList
+          ref={pagerRef}
+          data={activeWeekDays}
+          keyExtractor={(item) => item.date || String(item.dayId)}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          decelerationRate="fast"
+          snapToInterval={SCREEN_WIDTH}
+          snapToAlignment="center"
+          disableIntervalMomentum={true}
+          initialScrollIndex={initialDayIndex}
+          getItemLayout={(_, index) => ({
+            length: SCREEN_WIDTH,
+            offset: SCREEN_WIDTH * index,
+            index,
+          })}
+          onMomentumScrollEnd={handlePagerMomentumEnd}
+          renderItem={({ item }) => (
+            <View style={{ width: SCREEN_WIDTH, flex: 1 }}>
+              <TimeGrid
+                day={item}
+                isToday={item.date === todayIso}
+                isRefreshing={isRefreshing || isFetchingWeek}
+                onRefresh={handleRefresh}
+                onPressLesson={handlePressLesson}
+              />
             </View>
-
-            {activeSchedule?.lessons && activeSchedule.lessons.length > 0 ? (
-              activeSchedule.lessons.map((lesson: TimetableLesson) => (
-                <View key={lesson.id} style={styles.lessonCard}>
-                  <View style={styles.timeBadgeCol}>
-                    <View style={styles.hourNumberCircle}>
-                      <Text style={styles.hourNumberText}>{lesson.hourNumber}</Text>
-                    </View>
-                    <Text style={styles.timeSpanText}>{lesson.timeSpan}</Text>
-                  </View>
-
-                  <View style={styles.lessonInfoCol}>
-                    <Text style={styles.subjectText}>{lesson.subject}</Text>
-                    <View style={styles.metaRow}>
-                      <View style={styles.classroomBadge}>
-                        <Ionicons name="location-outline" size={13} color="#94a3b8" />
-                        <Text style={styles.classroomText}>{lesson.classroom}</Text>
-                      </View>
-                      <View style={styles.teacherBadge}>
-                        <Ionicons name="person-outline" size={13} color="#94a3b8" />
-                        <Text style={styles.teacherText}>{lesson.teacher}</Text>
-                      </View>
-                    </View>
-                  </View>
-                </View>
-              ))
-            ) : (
-              <View style={styles.emptyCard}>
-                <Ionicons name="sunny-outline" size={48} color="#94a3b8" />
-                <Text style={styles.emptyTitle}>Brak lekcji</Text>
-                <Text style={styles.emptySubtitle}>
-                  W tym dniu nie ma zaplanowanych zajęć szkolnych.
-                </Text>
-              </View>
-            )}
-          </ScrollView>
-        </>
+          )}
+        />
       )}
+
+      {/* Floating Bottom Day Bar */}
+      <DayBar
+        weekStart={activeWeekStart}
+        days={activeWeekDays}
+        selectedDayIndex={selectedDayIndex}
+        todayIso={todayIso}
+        initialWeekStart={initialWeekStart}
+        onSelectDay={(idx) => selectDay(idx, true)}
+        onPrevWeek={handlePrevWeek}
+        onNextWeek={handleNextWeek}
+        onJumpToToday={handleJumpToToday}
+      />
+
+      {/* Lesson Details Bottom Sheet Modal */}
+      <LessonDetailsModal
+        visible={modalLessonIndex !== null}
+        dayLabel={headerDateLabel}
+        lessons={activeDay?.lessons ?? []}
+        initialIndex={modalLessonIndex ?? 0}
+        onClose={() => setModalLessonIndex(null)}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
+  container: {
     flex: 1,
     backgroundColor: '#0f172a',
   },
   header: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'baseline',
-    paddingHorizontal: 18,
-    paddingTop: 12,
-    paddingBottom: 8,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: '700',
     color: '#f8fafc',
+    fontSize: 24,
+    fontWeight: '800',
+    letterSpacing: -0.3,
   },
-  headerDate: {
-    fontSize: 13,
-    color: '#38bdf8',
-    fontWeight: '600',
-  },
-  daysRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 14,
-    gap: 8,
-    marginTop: 8,
-  },
-  dayTab: {
-    flex: 1,
-    paddingVertical: 10,
-    backgroundColor: '#1e293b',
-    borderRadius: 12,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  dayTabActive: {
-    backgroundColor: '#2563eb',
-    borderColor: '#3b82f6',
-  },
-  dayShortName: {
-    fontSize: 14,
-    fontWeight: '700',
+  headerSubtitle: {
     color: '#94a3b8',
-  },
-  dayShortNameActive: {
-    color: '#ffffff',
-  },
-  dayLessonsCount: {
-    fontSize: 10,
-    color: '#64748b',
+    fontSize: 13,
+    fontWeight: '600',
     marginTop: 2,
   },
-  dayLessonsCountActive: {
-    color: '#bfdbfe',
-  },
-  listContainer: {
-    padding: 18,
-    gap: 10,
-    paddingBottom: 40,
-  },
-  dayBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 4,
-  },
-  dayBannerText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#94a3b8',
-  },
-  lessonCard: {
-    flexDirection: 'row',
-    backgroundColor: '#1e293b',
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#334155',
-    alignItems: 'center',
-  },
-  timeBadgeCol: {
-    alignItems: 'center',
-    width: 80,
-    paddingRight: 10,
-    borderRightWidth: 1,
-    borderRightColor: '#334155',
-  },
-  hourNumberCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#334155',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  hourNumberText: {
-    color: '#f8fafc',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  timeSpanText: {
-    color: '#94a3b8',
-    fontSize: 10,
-    fontWeight: '600',
-    marginTop: 4,
-    textAlign: 'center',
-  },
-  lessonInfoCol: {
+  loadingContainer: {
     flex: 1,
-    paddingLeft: 12,
-  },
-  subjectText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#f8fafc',
-  },
-  metaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    marginTop: 6,
-  },
-  classroomBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  classroomText: {
-    fontSize: 12,
-    color: '#94a3b8',
-  },
-  teacherBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  teacherText: {
-    fontSize: 12,
-    color: '#94a3b8',
-  },
-  emptyCard: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
-    backgroundColor: '#1e293b',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#334155',
-    marginTop: 20,
+    gap: 12,
+    paddingBottom: 80,
   },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#f8fafc',
-    marginTop: 12,
-  },
-  emptySubtitle: {
-    fontSize: 13,
+  loadingText: {
     color: '#94a3b8',
-    marginTop: 4,
-    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

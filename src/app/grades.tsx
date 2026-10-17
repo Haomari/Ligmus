@@ -1,23 +1,61 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  RefreshControl,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLibrus } from '@/context/LibrusContext';
 import { Grade, SubjectGrades } from '@/types/librus';
+import { GradeDetailsModal, getGradeColor } from '@/components/grade-details-modal';
 
 export default function GradesScreen() {
   const { grades, isLoading, refreshData } = useLibrus();
-  const [selectedSemester, setSelectedSemester] = useState<1 | 2>(2);
-  const [expandedSubject, setExpandedSubject] = useState<string | null>(null);
+  const insets = useSafeAreaInsets();
 
-  // Compute total GPA
+  const [selectedSemester, setSelectedSemester] = useState<1 | 2>(1);
+  const [hasInitializedSemester, setHasInitializedSemester] = useState(false);
+
+  // Modal State
+  const [modalState, setModalState] = useState<{
+    visible: boolean;
+    subjectName: string;
+    grades: Grade[];
+    initialIndex: number;
+  }>({
+    visible: false,
+    subjectName: '',
+    grades: [],
+    initialIndex: 0,
+  });
+
+  // Automatically detect and set active semester to the one with the newest grade
+  useEffect(() => {
+    if (!hasInitializedSemester && grades.length > 0) {
+      let latestSem1Date = 0;
+      let latestSem2Date = 0;
+
+      for (const s of grades) {
+        for (const g of s.grades) {
+          const time = new Date(g.date).getTime() || 0;
+          if (g.semester === 1 && time > latestSem1Date) latestSem1Date = time;
+          if (g.semester === 2 && time > latestSem2Date) latestSem2Date = time;
+        }
+      }
+
+      if (latestSem2Date > latestSem1Date) {
+        setSelectedSemester(2);
+      } else {
+        setSelectedSemester(1);
+      }
+      setHasInitializedSemester(true);
+    }
+  }, [grades, hasInitializedSemester]);
+
+  // Compute total GPA for selected semester
   const validAverages = grades
     .map((s) => (selectedSemester === 1 ? s.averageSem1 : s.averageSem2))
     .filter((avg): avg is number => avg !== null && avg > 0);
@@ -27,17 +65,28 @@ export default function GradesScreen() {
       ? (validAverages.reduce((acc, curr) => acc + curr, 0) / validAverages.length).toFixed(2)
       : '--';
 
-  const toggleExpand = (id: string) => {
-    setExpandedSubject(expandedSubject === id ? null : id);
-  };
+  // Sort subjects: subjects with most recent grades appear at the top
+  const sortedSubjects = useMemo(() => {
+    return [...grades].sort((a, b) => {
+      const aGrades = a.grades.filter((g) => g.semester === selectedSemester);
+      const bGrades = b.grades.filter((g) => g.semester === selectedSemester);
 
-  const getGradeColor = (val: string) => {
-    if (val.startsWith('6') || val.startsWith('5')) return '#10b981';
-    if (val.startsWith('4')) return '#3b82f6';
-    if (val.startsWith('3')) return '#f59e0b';
-    if (val.startsWith('2')) return '#f97316';
-    return '#ef4444';
-  };
+      if (aGrades.length > 0 && bGrades.length === 0) return -1;
+      if (aGrades.length === 0 && bGrades.length > 0) return 1;
+      if (aGrades.length === 0 && bGrades.length === 0) {
+        return a.subjectName.localeCompare(b.subjectName);
+      }
+
+      const aLatest = Math.max(...aGrades.map((g) => new Date(g.date).getTime() || 0));
+      const bLatest = Math.max(...bGrades.map((g) => new Date(g.date).getTime() || 0));
+
+      if (bLatest !== aLatest) {
+        return bLatest - aLatest;
+      }
+
+      return a.subjectName.localeCompare(b.subjectName);
+    });
+  }, [grades, selectedSemester]);
 
   const getAvgColor = (avg: number | null) => {
     if (!avg) return '#94a3b8';
@@ -45,6 +94,19 @@ export default function GradesScreen() {
     if (avg >= 3.75) return '#3b82f6';
     if (avg >= 2.75) return '#f59e0b';
     return '#ef4444';
+  };
+
+  const openGradeModal = (subjectName: string, subjectGrades: Grade[], index: number) => {
+    setModalState({
+      visible: true,
+      subjectName,
+      grades: subjectGrades,
+      initialIndex: index,
+    });
+  };
+
+  const closeModal = () => {
+    setModalState((prev) => ({ ...prev, visible: false }));
   };
 
   return (
@@ -84,23 +146,40 @@ export default function GradesScreen() {
       </View>
 
       <ScrollView
-        contentContainerStyle={styles.listContainer}
+        contentContainerStyle={[
+          styles.listContainer,
+          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+        ]}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
         }>
-        {grades.map((subject: SubjectGrades) => {
-          const semGrades = subject.grades.filter((g) => g.semester === selectedSemester);
+        {sortedSubjects.map((subject: SubjectGrades) => {
+          const semGrades = subject.grades
+            .filter((g) => g.semester === selectedSemester)
+            .sort((a, b) => {
+              const timeA = new Date(a.date).getTime() || 0;
+              const timeB = new Date(b.date).getTime() || 0;
+              return timeB - timeA;
+            });
           const currentAvg =
             selectedSemester === 1 ? subject.averageSem1 : subject.averageSem2;
-          const isExpanded = expandedSubject === subject.id;
+
+          const hasGrades = semGrades.length > 0;
 
           return (
-            <View key={subject.id} style={styles.subjectCard}>
-              <TouchableOpacity
-                style={styles.subjectHeader}
-                activeOpacity={0.7}
-                onPress={() => toggleExpand(subject.id)}>
+            <TouchableOpacity
+              key={subject.id}
+              style={styles.subjectCard}
+              activeOpacity={hasGrades ? 0.75 : 1}
+              disabled={!hasGrades}
+              onPress={() => {
+                if (hasGrades) {
+                  openGradeModal(subject.subjectName, semGrades, 0);
+                }
+              }}>
+              {/* Symmetrical Card Header */}
+              <View style={styles.subjectHeader}>
                 <View style={styles.subjectTitleCol}>
                   <Text style={styles.subjectName}>{subject.subjectName}</Text>
                   <Text style={styles.subjectCount}>
@@ -108,86 +187,67 @@ export default function GradesScreen() {
                   </Text>
                 </View>
 
-                <View style={styles.subjectRightCol}>
-                  {currentAvg !== null && (
-                    <View
+                {currentAvg !== null && (
+                  <View
+                    style={[
+                      styles.averageBadge,
+                      { backgroundColor: getAvgColor(currentAvg) + '25' },
+                    ]}>
+                    <Text
                       style={[
-                        styles.averageBadge,
-                        { backgroundColor: getAvgColor(currentAvg) + '25' },
+                        styles.averageValue,
+                        { color: getAvgColor(currentAvg) },
                       ]}>
-                      <Text
-                        style={[
-                          styles.averageValue,
-                          { color: getAvgColor(currentAvg) },
-                        ]}>
-                        {currentAvg.toFixed(2)}
-                      </Text>
-                    </View>
-                  )}
-                  <Ionicons
-                    name={isExpanded ? 'chevron-up' : 'chevron-down'}
-                    size={20}
-                    color="#94a3b8"
-                    style={{ marginLeft: 8 }}
-                  />
-                </View>
-              </TouchableOpacity>
+                      {currentAvg.toFixed(2)}
+                    </Text>
+                  </View>
+                )}
+              </View>
 
-              {/* Horizontal Grade Pills */}
+              {/* Horizontal Grade Pills (Sorted Newest First) */}
               <View style={styles.pillsRow}>
-                {semGrades.length > 0 ? (
-                  semGrades.map((g: Grade) => (
-                    <View
-                      key={g.id}
-                      style={[
-                        styles.gradePill,
-                        { backgroundColor: getGradeColor(g.value) + '20' },
-                      ]}>
-                      <Text
+                {hasGrades ? (
+                  semGrades.map((g: Grade, idx: number) => {
+                    const gradeColor = getGradeColor(g.value);
+                    const isImproved = !!g.correction;
+
+                    return (
+                      <TouchableOpacity
+                        key={g.id}
+                        activeOpacity={0.7}
+                        onPress={() => openGradeModal(subject.subjectName, semGrades, idx)}
                         style={[
-                          styles.gradePillText,
-                          { color: getGradeColor(g.value) },
+                          styles.gradePill,
+                          {
+                            backgroundColor: gradeColor + '20',
+                            borderColor: isImproved ? gradeColor : 'transparent',
+                            borderWidth: isImproved ? 2 : 1,
+                          },
                         ]}>
-                        {g.value}
-                      </Text>
-                    </View>
-                  ))
+                        <Text style={[styles.gradePillText, { color: gradeColor }]}>
+                          {g.value}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })
                 ) : (
                   <Text style={styles.noGradesText}>Brak ocen w tym semestrze</Text>
                 )}
               </View>
-
-              {/* Expanded details list */}
-              {isExpanded && semGrades.length > 0 && (
-                <View style={styles.detailsContainer}>
-                  <View style={styles.detailsDivider} />
-                  {semGrades.map((g: Grade) => (
-                    <View key={'detail-' + g.id} style={styles.detailRow}>
-                      <View
-                        style={[
-                          styles.detailGradeBadge,
-                          { backgroundColor: getGradeColor(g.value) },
-                        ]}>
-                        <Text style={styles.detailGradeText}>{g.value}</Text>
-                      </View>
-                      <View style={styles.detailInfo}>
-                        <Text style={styles.detailCategory}>
-                          {g.category}{' '}
-                          <Text style={styles.detailWeight}>(waga {g.weight})</Text>
-                        </Text>
-                        {g.comment ? (
-                          <Text style={styles.detailComment}>{g.comment}</Text>
-                        ) : null}
-                      </View>
-                      <Text style={styles.detailDate}>{g.date}</Text>
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
+            </TouchableOpacity>
           );
         })}
       </ScrollView>
+
+      {/* Grade Details Swipeable Carousel Modal */}
+      <GradeDetailsModal
+        key={`${modalState.subjectName}-${modalState.grades.length}-${modalState.initialIndex}`}
+        visible={modalState.visible}
+        subjectName={modalState.subjectName}
+        grades={modalState.grades}
+        initialIndex={modalState.initialIndex}
+        onClose={closeModal}
+      />
     </SafeAreaView>
   );
 }
@@ -260,12 +320,11 @@ const styles = StyleSheet.create({
   listContainer: {
     padding: 18,
     gap: 12,
-    paddingBottom: 40,
   },
   subjectCard: {
     backgroundColor: '#1e293b',
     borderRadius: 16,
-    padding: 14,
+    padding: 16,
     borderWidth: 1,
     borderColor: '#334155',
   },
@@ -276,6 +335,7 @@ const styles = StyleSheet.create({
   },
   subjectTitleCol: {
     flex: 1,
+    marginRight: 12,
   },
   subjectName: {
     fontSize: 16,
@@ -286,14 +346,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#94a3b8',
     marginTop: 2,
-  },
-  subjectRightCol: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    fontWeight: '500',
   },
   averageBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 8,
   },
   averageValue: {
@@ -303,74 +360,24 @@ const styles = StyleSheet.create({
   pillsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 12,
+    gap: 8,
+    marginTop: 14,
   },
   gradePill: {
-    minWidth: 32,
-    height: 32,
-    paddingHorizontal: 8,
-    borderRadius: 8,
+    minWidth: 36,
+    height: 36,
+    paddingHorizontal: 10,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },
   gradePillText: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
   },
   noGradesText: {
     color: '#64748b',
     fontSize: 12,
     fontStyle: 'italic',
-  },
-  detailsContainer: {
-    marginTop: 10,
-  },
-  detailsDivider: {
-    height: 1,
-    backgroundColor: '#334155',
-    marginBottom: 10,
-  },
-  detailRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#243248',
-  },
-  detailGradeBadge: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 10,
-  },
-  detailGradeText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  detailInfo: {
-    flex: 1,
-  },
-  detailCategory: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#f1f5f9',
-  },
-  detailWeight: {
-    fontSize: 12,
-    color: '#94a3b8',
-    fontWeight: '400',
-  },
-  detailComment: {
-    fontSize: 12,
-    color: '#60a5fa',
-    marginTop: 2,
-  },
-  detailDate: {
-    fontSize: 11,
-    color: '#64748b',
   },
 });

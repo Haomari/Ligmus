@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   ScrollView,
   StyleSheet,
@@ -7,14 +7,32 @@ import {
   View,
   RefreshControl,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
+import { getGradeColor } from '@/components/grade-details-modal';
+import { DaySchedule, TimetableLesson } from '@/types/librus';
+import {
+  getInitialSchoolDate,
+  getMonday,
+  parseHM,
+  toISODate,
+} from '@/utils/dates';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { student, grades, timetable, isAuthenticated, isLoading, refreshData } = useLibrus();
+  const insets = useSafeAreaInsets();
+  const {
+    student,
+    grades,
+    timetable,
+    weeks,
+    attendanceStats,
+    isAuthenticated,
+    isLoading,
+    refreshData,
+  } = useLibrus();
 
   React.useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -22,9 +40,57 @@ export default function HomeScreen() {
     }
   }, [isLoading, isAuthenticated]);
 
-  // Get current day's first lessons (e.g. Monday/Day 1)
-  const todaySchedule = timetable[0];
-  const nextLesson = todaySchedule?.lessons?.[0];
+  const { nextLesson, nextLessonDayLabel } = useMemo((): {
+    nextLesson: TimetableLesson | null;
+    nextLessonDayLabel: string | null;
+  } => {
+    const now = new Date();
+    const todayIso = toISODate(now);
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+
+    const targetDate = getInitialSchoolDate(now);
+    const targetWeekStart = toISODate(getMonday(targetDate));
+    const days: DaySchedule[] = weeks[targetWeekStart]?.days ?? timetable ?? [];
+
+    // 1. Check remaining non-cancelled lessons today
+    const todaySchedule = days.find((d) => d.date === todayIso);
+    if (todaySchedule) {
+      const upcomingToday = todaySchedule.lessons.find(
+        (l) => !l.isCancelled && parseHM(l.endTime || '23:59') >= nowMin
+      );
+      if (upcomingToday) {
+        return { nextLesson: upcomingToday, nextLessonDayLabel: 'Dzisiaj' };
+      }
+    }
+
+    // 2. Otherwise find the first non-cancelled lesson on a future school day in this/next week
+    for (const d of days) {
+      if (d.date > todayIso) {
+        const firstActive = d.lessons.find((l) => !l.isCancelled);
+        if (firstActive) {
+          return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
+        }
+      }
+    }
+
+    // 3. Fallback to first non-cancelled lesson in days
+    for (const d of days) {
+      const firstActive = d.lessons.find((l) => !l.isCancelled);
+      if (firstActive) {
+        return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
+      }
+    }
+
+    return { nextLesson: null, nextLessonDayLabel: null };
+  }, [weeks, timetable]);
+
+  const attendanceColor = useMemo(() => {
+    const pct = attendanceStats?.percent;
+    if (pct == null) return '#3b82f6';
+    if (pct >= 85) return '#10b981';
+    if (pct >= 70) return '#f59e0b';
+    return '#ef4444';
+  }, [attendanceStats?.percent]);
 
   // Flatten and sort all grades by date descending to show recent
   const allGrades = grades
@@ -32,18 +98,13 @@ export default function HomeScreen() {
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
     .slice(0, 4);
 
-  const getGradeColor = (val: string) => {
-    if (val.startsWith('6') || val.startsWith('5')) return '#10b981'; // Green
-    if (val.startsWith('4')) return '#3b82f6'; // Blue
-    if (val.startsWith('3')) return '#f59e0b'; // Amber
-    if (val.startsWith('2')) return '#f97316'; // Orange
-    return '#ef4444'; // Red
-  };
-
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <ScrollView
-        contentContainerStyle={styles.container}
+        contentContainerStyle={[
+          styles.container,
+          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+        ]}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
@@ -78,6 +139,69 @@ export default function HomeScreen() {
           </View>
         </View>
 
+        {/* Frekwencja % Tile */}
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => router.push('/timetable' as any)}
+          style={[styles.card, styles.attendanceCard]}>
+          <View style={styles.attendanceHeaderRow}>
+            <View style={styles.attendanceTitleCol}>
+              <View style={styles.attendanceLabelRow}>
+                <Ionicons name="pie-chart-outline" size={18} color={attendanceColor} />
+                <Text style={styles.attendanceTitle}>Frekwencja</Text>
+              </View>
+              <Text style={styles.attendanceSub}>
+                Obecności i spóźnienia w bieżącym roku
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.attendancePercentBadge,
+                {
+                  backgroundColor: `${attendanceColor}1A`,
+                  borderColor: `${attendanceColor}55`,
+                },
+              ]}>
+              <Text style={[styles.attendancePercentText, { color: attendanceColor }]}>
+                {attendanceStats?.percent != null
+                  ? `${attendanceStats.percent.toFixed(1)}%`
+                  : '--%'}
+              </Text>
+            </View>
+          </View>
+
+          {attendanceStats && attendanceStats.total > 0 && (
+            <View style={styles.attendancePillsRow}>
+              <View style={styles.statPill}>
+                <View style={[styles.statDot, { backgroundColor: '#10b981' }]} />
+                <Text style={styles.statPillText}>
+                  Obecności: {attendanceStats.present}
+                </Text>
+              </View>
+              <View style={styles.statPill}>
+                <View style={[styles.statDot, { backgroundColor: '#ef4444' }]} />
+                <Text style={styles.statPillText}>
+                  Nieobecności: {attendanceStats.absent}
+                </Text>
+              </View>
+              {attendanceStats.excused > 0 && (
+                <View style={styles.statPill}>
+                  <View style={[styles.statDot, { backgroundColor: '#3b82f6' }]} />
+                  <Text style={styles.statPillText}>
+                    Uspr.: {attendanceStats.excused}
+                  </Text>
+                </View>
+              )}
+              <View style={styles.statPill}>
+                <View style={[styles.statDot, { backgroundColor: '#f59e0b' }]} />
+                <Text style={styles.statPillText}>
+                  Spóźnienia: {attendanceStats.late}
+                </Text>
+              </View>
+            </View>
+          )}
+        </TouchableOpacity>
+
         {/* Next Lesson Card */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -88,27 +212,48 @@ export default function HomeScreen() {
           </View>
 
           {nextLesson ? (
-            <View style={[styles.card, styles.lessonCard]}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => router.push('/timetable' as any)}
+              style={[styles.card, styles.lessonCard]}>
               <View style={styles.lessonTimeCol}>
                 <Text style={styles.lessonHour}>Lekcja {nextLesson.hourNumber}</Text>
-                <Text style={styles.lessonTime}>{nextLesson.timeSpan}</Text>
+                <Text style={styles.lessonTime}>
+                  {nextLesson.startTime && nextLesson.endTime
+                    ? `${nextLesson.startTime}–${nextLesson.endTime}`
+                    : nextLesson.timeSpan}
+                </Text>
               </View>
               <View style={styles.lessonDivider} />
               <View style={styles.lessonInfoCol}>
-                <Text style={styles.lessonSubject}>{nextLesson.subject}</Text>
-                <Text style={styles.lessonMeta}>
-                  {nextLesson.classroom} • {nextLesson.teacher}
+                <View style={styles.lessonTitleRow}>
+                  <Text style={styles.lessonSubject} numberOfLines={1}>
+                    {nextLesson.subject}
+                  </Text>
+                  {nextLesson.isSubstitution && (
+                    <View style={styles.subBadge}>
+                      <Text style={styles.subBadgeText}>Zastępstwo</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.lessonMeta} numberOfLines={1}>
+                  {nextLesson.classroom ? `s. ${nextLesson.classroom}` : ''}
+                  {nextLesson.classroom && nextLesson.teacher ? ' • ' : ''}
+                  {nextLesson.teacher}
                 </Text>
               </View>
-            </View>
+            </TouchableOpacity>
           ) : (
-            <View style={[styles.card, styles.emptyCard]}>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => router.push('/timetable' as any)}
+              style={[styles.card, styles.emptyCard]}>
               <Ionicons name="calendar-outline" size={22} color="#64748b" style={{ marginBottom: 4 }} />
-              <Text style={styles.emptyText}>Plan lekcji w przygotowaniu</Text>
+              <Text style={styles.emptyText}>Brak nadchodzących lekcji</Text>
               <Text style={{ color: '#64748b', fontSize: 12, marginTop: 2 }}>
-                Lekcje pojawią się tutaj po pobraniu planu.
+                Dotknij, aby otworzyć pełny plan lekcji.
               </Text>
-            </View>
+            </TouchableOpacity>
           )}
         </View>
 
@@ -141,6 +286,7 @@ export default function HomeScreen() {
                   <Text style={styles.gradeSubject}>{g.subjectName}</Text>
                   <Text style={styles.gradeMeta}>
                     {g.category} (waga {g.weight})
+                    {g.correction ? ` • popr. z ${g.correction.originalValue}` : ''}
                     {g.comment ? ` • ${g.comment}` : ''}
                   </Text>
                 </View>
@@ -240,6 +386,72 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#ffffff',
   },
+  attendanceCard: {
+    gap: 12,
+  },
+  attendanceHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  attendanceTitleCol: {
+    flex: 1,
+  },
+  attendanceLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  attendanceTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#f8fafc',
+  },
+  attendanceSub: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+  attendancePercentBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attendancePercentText: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  attendancePillsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+  },
+  statPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  statDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statPillText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '600',
+  },
   section: {
     gap: 10,
   },
@@ -287,10 +499,30 @@ const styles = StyleSheet.create({
   lessonInfoCol: {
     flex: 1,
   },
+  lessonTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   lessonSubject: {
+    flexShrink: 1,
     fontSize: 16,
     fontWeight: '700',
     color: '#f8fafc',
+  },
+  subBadge: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  subBadgeText: {
+    color: '#fbbf24',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
   },
   lessonMeta: {
     fontSize: 13,

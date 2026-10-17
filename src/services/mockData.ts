@@ -304,6 +304,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'mon-1',
         hourNumber: 1,
+        startTime: '08:00',
+        endTime: '08:45',
         timeSpan: '08:00 - 08:45',
         subject: 'Matematyka',
         teacher: 'mgr A. Nowak',
@@ -312,6 +314,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'mon-2',
         hourNumber: 2,
+        startTime: '08:50',
+        endTime: '09:35',
         timeSpan: '08:50 - 09:35',
         subject: 'Matematyka',
         teacher: 'mgr A. Nowak',
@@ -320,6 +324,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'mon-3',
         hourNumber: 3,
+        startTime: '09:45',
+        endTime: '10:30',
         timeSpan: '09:45 - 10:30',
         subject: 'Język angielski',
         teacher: 'mgr M. Zielińska',
@@ -328,6 +334,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'mon-4',
         hourNumber: 4,
+        startTime: '10:45',
+        endTime: '11:30',
         timeSpan: '10:45 - 11:30',
         subject: 'Informatyka',
         teacher: 'mgr inż. T. Wiśniewski',
@@ -336,6 +344,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'mon-5',
         hourNumber: 5,
+        startTime: '11:45',
+        endTime: '12:30',
         timeSpan: '11:45 - 12:30',
         subject: 'Fizyka',
         teacher: 'dr P. Lewandowski',
@@ -352,6 +362,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'tue-1',
         hourNumber: 1,
+        startTime: '08:00',
+        endTime: '08:45',
         timeSpan: '08:00 - 08:45',
         subject: 'Język polski',
         teacher: 'mgr K. Dąbrowska',
@@ -360,6 +372,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'tue-2',
         hourNumber: 2,
+        startTime: '08:50',
+        endTime: '09:35',
         timeSpan: '08:50 - 09:35',
         subject: 'Język polski',
         teacher: 'mgr K. Dąbrowska',
@@ -368,6 +382,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'tue-3',
         hourNumber: 3,
+        startTime: '09:45',
+        endTime: '10:30',
         timeSpan: '09:45 - 10:30',
         subject: 'Chemia',
         teacher: 'mgr E. Kamińska',
@@ -376,6 +392,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'tue-4',
         hourNumber: 4,
+        startTime: '10:45',
+        endTime: '11:30',
         timeSpan: '10:45 - 11:30',
         subject: 'Historia',
         teacher: 'mgr J. Szymański',
@@ -384,6 +402,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'tue-5',
         hourNumber: 5,
+        startTime: '11:45',
+        endTime: '12:30',
         timeSpan: '11:45 - 12:30',
         subject: 'Wychowanie fizyczne',
         teacher: 'mgr M. Wójcik',
@@ -392,6 +412,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'tue-6',
         hourNumber: 6,
+        startTime: '12:45',
+        endTime: '13:30',
         timeSpan: '12:45 - 13:30',
         subject: 'Wychowanie fizyczne',
         teacher: 'mgr M. Wójcik',
@@ -408,6 +430,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'wed-1',
         hourNumber: 2,
+        startTime: '08:50',
+        endTime: '09:35',
         timeSpan: '08:50 - 09:35',
         subject: 'Informatyka',
         teacher: 'mgr inż. T. Wiśniewski',
@@ -416,6 +440,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'wed-2',
         hourNumber: 3,
+        startTime: '09:45',
+        endTime: '10:30',
         timeSpan: '09:45 - 10:30',
         subject: 'Matematyka',
         teacher: 'mgr A. Nowak',
@@ -424,6 +450,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'wed-3',
         hourNumber: 4,
+        startTime: '10:45',
+        endTime: '11:30',
         timeSpan: '10:45 - 11:30',
         subject: 'Biologia',
         teacher: 'mgr A. Kozłowska',
@@ -432,6 +460,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'wed-4',
         hourNumber: 5,
+        startTime: '11:45',
+        endTime: '12:30',
         timeSpan: '11:45 - 12:30',
         subject: 'Język angielski',
         teacher: 'mgr M. Zielińska',
@@ -448,6 +478,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'thu-1',
         hourNumber: 1,
+        startTime: '08:00',
+        endTime: '08:45',
         timeSpan: '08:00 - 08:45',
         subject: 'Geografia',
         teacher: 'mgr R. Mazur',
@@ -456,6 +488,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'thu-2',
         hourNumber: 2,
+        startTime: '08:50',
+        endTime: '09:35',
         timeSpan: '08:50 - 09:35',
         subject: 'Fizyka',
         teacher: 'dr P. Lewandowski',
@@ -464,6 +498,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'thu-3',
         hourNumber: 3,
+        startTime: '09:45',
+        endTime: '10:30',
         timeSpan: '09:45 - 10:30',
         subject: 'Język polski',
         teacher: 'mgr K. Dąbrowska',
@@ -472,6 +508,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'thu-4',
         hourNumber: 4,
+        startTime: '10:45',
+        endTime: '11:30',
         timeSpan: '10:45 - 11:30',
         subject: 'Matematyka',
         teacher: 'mgr A. Nowak',
@@ -488,6 +526,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'fri-1',
         hourNumber: 2,
+        startTime: '08:50',
+        endTime: '09:35',
         timeSpan: '08:50 - 09:35',
         subject: 'Język niemiecki',
         teacher: 'mgr B. Kaczmarek',
@@ -496,6 +536,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'fri-2',
         hourNumber: 3,
+        startTime: '09:45',
+        endTime: '10:30',
         timeSpan: '09:45 - 10:30',
         subject: 'Język angielski',
         teacher: 'mgr M. Zielińska',
@@ -504,6 +546,8 @@ export const mockTimetable: DaySchedule[] = [
       {
         id: 'fri-3',
         hourNumber: 4,
+        startTime: '10:45',
+        endTime: '11:30',
         timeSpan: '10:45 - 11:30',
         subject: 'Godzina z wychowawcą',
         teacher: 'mgr A. Nowak',

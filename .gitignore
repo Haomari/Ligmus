@@ -47,3 +47,7 @@ example
 
 # test-scripts
 scripts/
+
+# agents
+.agents/
+.agent/
