@@ -1,23 +1,35 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import {
   AttendanceMark,
   AttendanceStats,
   DaySchedule,
   LessonRealization,
+  LibrusMessageSummary,
+  MessageFolder,
   StudentInfo,
   SubjectGrades,
   WeekSchedule,
 } from '@/types/librus';
 import { librusClient } from '@/services/librusClient';
 import {
+  clearDataCachesOnly,
+  ensureSchoolYearCacheValid,
   getAllCachedWeeks,
   getCachedAttendanceMarks,
+  getCachedMessages,
   getCachedRealizations,
+  isValidAttendanceStats,
   saveCachedAttendanceStats,
+  saveCachedMessages,
   saveCachedWeek,
+  weekHasLessons,
 } from '@/services/fileCache';
-import { computeStats, mergeAttendanceAndTopics } from '@/services/timetableMapper';
+import {
+  computeDetailedAttendance,
+  computeStats,
+  mergeAttendanceAndTopics,
+} from '@/services/timetableMapper';
 import { getInitialSchoolDate, getMonday, toISODate } from '@/utils/dates';
 
 interface LibrusContextType {
@@ -26,7 +38,16 @@ interface LibrusContextType {
   timetable: DaySchedule[];
   weeks: Record<string, WeekSchedule>;
   attendanceStats: AttendanceStats | null;
+  attendanceMarks: AttendanceMark[];
+  realizations: LessonRealization[];
+  inboxMessages: LibrusMessageSummary[];
+  sentMessages: LibrusMessageSummary[];
+  unreadMessagesCount: number;
+  hasLowSubjectAttendance: boolean;
   loadWeek: (weekStartIso: string, forceNetwork?: boolean) => Promise<WeekSchedule | null>;
+  loadMessages: (folder: MessageFolder) => Promise<LibrusMessageSummary[]>;
+  markMessageAsReadLocal: (messageId: string) => void;
+  clearLocalCacheAndRefresh: () => Promise<void>;
   isAuthenticated: boolean;
   isLoading: boolean;
   isRefreshing: boolean;
@@ -43,6 +64,10 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [timetable, setTimetable] = useState<DaySchedule[]>([]);
   const [weeks, setWeeks] = useState<Record<string, WeekSchedule>>({});
   const [attendanceStats, setAttendanceStats] = useState<AttendanceStats | null>(null);
+  const [attendanceMarks, setAttendanceMarks] = useState<AttendanceMark[]>([]);
+  const [realizations, setRealizations] = useState<LessonRealization[]>([]);
+  const [inboxMessages, setInboxMessages] = useState<LibrusMessageSummary[]>([]);
+  const [sentMessages, setSentMessages] = useState<LibrusMessageSummary[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -50,66 +75,128 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const appState = useRef<AppStateStatus>(AppState.currentState);
   const marksRef = useRef<AttendanceMark[]>([]);
   const realizationsRef = useRef<LessonRealization[]>([]);
+  const isSyncingRef = useRef<boolean>(false);
+
+  const unreadMessagesCount = useMemo(
+    () => inboxMessages.filter((m) => m.isUnread).length,
+    [inboxMessages]
+  );
+
+  const hasLowSubjectAttendance = useMemo(() => {
+    if (attendanceMarks.length === 0 && Object.keys(weeks).length === 0) return false;
+    const detailed = computeDetailedAttendance(
+      attendanceMarks,
+      realizations,
+      weeks,
+      'year'
+    );
+    return detailed.lowAttendanceSubjects.length > 0;
+  }, [attendanceMarks, realizations, weeks]);
 
   const loadWeek = useCallback(
     async (weekStartIso: string, forceNetwork: boolean = false): Promise<WeekSchedule | null> => {
+      console.log(`[LibrusContext loadWeek] Requesting week: ${weekStartIso}, forceNetwork: ${forceNetwork}`);
       const cached = librusClient.getCachedWeekSchedule(weekStartIso);
-      if (cached) {
+      const cachedLessons = cached?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0;
+      console.log(`[LibrusContext loadWeek] Cached week exists: ${Boolean(cached)}, total lessons: ${cachedLessons}`);
+      if (cached && weekHasLessons(cached)) {
         const mergedCached = mergeAttendanceAndTopics(
           cached,
           marksRef.current,
           realizationsRef.current
         );
-        setWeeks((prev) => ({ ...prev, [weekStartIso]: mergedCached }));
+        setWeeks((prev) => {
+          const current = prev[weekStartIso];
+          if (
+            current &&
+            current.fetchedAt === mergedCached.fetchedAt &&
+            current.days.length === mergedCached.days.length
+          ) {
+            return prev;
+          }
+          return { ...prev, [weekStartIso]: mergedCached };
+        });
         if (!forceNetwork && Date.now() - cached.fetchedAt < 5 * 60 * 1000) {
           return mergedCached;
         }
       }
 
+      console.log(`[LibrusContext loadWeek] Calling librusClient.getWeek(${weekStartIso})...`);
       const fresh = await librusClient.getWeek(weekStartIso);
-      if (fresh) {
+      const freshLessons = fresh?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0;
+      console.log(`[LibrusContext loadWeek] librusClient.getWeek result: ${Boolean(fresh)}, total lessons: ${freshLessons}`);
+      if (fresh && weekHasLessons(fresh)) {
         const mergedFresh = mergeAttendanceAndTopics(
           fresh,
           marksRef.current,
           realizationsRef.current
         );
         saveCachedWeek(mergedFresh);
-        setWeeks((prev) => {
-          const updated = { ...prev, [weekStartIso]: mergedFresh };
-          setAttendanceStats((prevStats) => {
-            if (prevStats && prevStats.present > 0) return prevStats;
-            const recomputed = computeStats(
-              marksRef.current,
-              realizationsRef.current,
-              null,
-              prevStats
-                ? {
-                    present: 0,
-                    absent: prevStats.absent,
-                    excused: prevStats.excused,
-                    late: prevStats.late,
-                    exempt: prevStats.exempt,
-                  }
-                : null,
-              updated
-            );
-            if (recomputed.total > 0) {
-              saveCachedAttendanceStats(recomputed);
-              return recomputed;
-            }
+        setWeeks((prev) => ({ ...prev, [weekStartIso]: mergedFresh }));
+
+        setAttendanceStats((prevStats) => {
+          if (prevStats && isValidAttendanceStats(prevStats) && prevStats.present > 0) {
             return prevStats;
-          });
-          return updated;
+          }
+          const allWk = { ...getAllCachedWeeks(), [weekStartIso]: mergedFresh };
+          const recomputed = computeStats(
+            marksRef.current,
+            realizationsRef.current,
+            null,
+            prevStats
+              ? {
+                  present: 0,
+                  absent: prevStats.absent,
+                  excused: prevStats.excused,
+                  late: prevStats.late,
+                  exempt: prevStats.exempt,
+                }
+              : null,
+            allWk
+          );
+          if (isValidAttendanceStats(recomputed)) {
+            saveCachedAttendanceStats(recomputed);
+            return recomputed;
+          }
+          return prevStats;
         });
+
         return mergedFresh;
       }
 
-      return cached ?? null;
+      return cached && weekHasLessons(cached) ? cached : null;
     },
     []
   );
 
+  const loadMessages = useCallback(async (folder: MessageFolder): Promise<LibrusMessageSummary[]> => {
+    const cached = getCachedMessages(folder);
+    if (cached && cached.length > 0) {
+      if (folder === 'inbox') setInboxMessages(cached);
+      else setSentMessages(cached);
+    }
+
+    const fresh = await librusClient.getMessages(folder);
+    if (fresh) {
+      if (folder === 'inbox') setInboxMessages(fresh);
+      else setSentMessages(fresh);
+      return fresh;
+    }
+    return cached ?? [];
+  }, []);
+
+  const markMessageAsReadLocal = useCallback((messageId: string) => {
+    setInboxMessages((prev) => {
+      const updated = prev.map((m) => (m.id === messageId ? { ...m, isUnread: false } : m));
+      saveCachedMessages('inbox', updated);
+      return updated;
+    });
+  }, []);
+
   const loadAllData = async (forceSpinner: boolean = false) => {
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+
     if (forceSpinner) {
       setIsLoading(true);
     } else {
@@ -117,6 +204,12 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     try {
+      // Check automatic school-year rollover (wipes prior year's cached data on Sep 1)
+      const rolledOver = ensureSchoolYearCacheValid();
+      if (rolledOver) {
+        await librusClient.clearGradesCache();
+      }
+
       const hasSession = await librusClient.checkSavedSession();
       setIsAuthenticated(hasSession);
 
@@ -126,10 +219,12 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setTimetable([]);
         setWeeks({});
         setAttendanceStats(null);
+        setAttendanceMarks([]);
+        setRealizations([]);
+        setInboxMessages([]);
+        setSentMessages([]);
         marksRef.current = [];
         realizationsRef.current = [];
-        setIsLoading(false);
-        setIsRefreshing(false);
         return;
       }
 
@@ -143,30 +238,34 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const cachedStats = librusClient.getCachedAttendanceStatsSync();
       const cachedMarks = getCachedAttendanceMarks() ?? [];
       const cachedReal = getCachedRealizations() ?? [];
+      const cachedInbox = getCachedMessages('inbox') ?? [];
+      const cachedSent = getCachedMessages('sent') ?? [];
 
-      marksRef.current = cachedMarks;
-      realizationsRef.current = cachedReal;
+      if (cachedMarks.length > 0) {
+        marksRef.current = cachedMarks;
+        setAttendanceMarks(cachedMarks);
+      }
+      if (cachedReal.length > 0) {
+        realizationsRef.current = cachedReal;
+        setRealizations(cachedReal);
+      }
+      if (cachedInbox.length > 0) setInboxMessages(cachedInbox);
+      if (cachedSent.length > 0) setSentMessages(cachedSent);
 
       if (cachedStu) setStudent(cachedStu);
       if (cachedGrd && cachedGrd.length > 0) setGrades(cachedGrd);
       if (Object.keys(cachedWeeks).length > 0) {
-        setWeeks(cachedWeeks);
+        setWeeks((prev) => ({ ...prev, ...cachedWeeks }));
         const initWeek = cachedWeeks[initialWeekStart] ?? Object.values(cachedWeeks)[0];
-        if (initWeek) {
+        if (initWeek && weekHasLessons(initWeek)) {
           setTimetable(initWeek.days);
         }
       }
-      if (cachedStats) {
-        const isLegacyBuggyCache =
-          cachedStats.late === 0 &&
-          cachedStats.present > 0 &&
-          cachedStats.present < cachedStats.excused;
-        if (!isLegacyBuggyCache) {
-          setAttendanceStats(cachedStats);
-        }
+      if (cachedStats && isValidAttendanceStats(cachedStats)) {
+        setAttendanceStats(cachedStats);
       }
 
-      // If we had cache, we can turn off the blocking spinner
+      // If we had cache, we can turn off the blocking spinner immediately
       if (
         cachedStu ||
         (cachedGrd && cachedGrd.length > 0) ||
@@ -176,28 +275,41 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       // 2. Fetch fresh live data from Synergia in parallel
-      // On weekends, also fetch the just-finished current week so past lessons & attendance stats are ready immediately
-      const [stu, grd, attData, freshWeek, currentCalendarWeek] = await Promise.all([
-        librusClient.getStudentInfo(),
-        librusClient.getGrades(),
-        librusClient.getAttendanceAndRealizations(),
-        librusClient.getWeek(initialWeekStart),
-        currentWeekStart !== initialWeekStart
-          ? librusClient.getWeek(currentWeekStart)
-          : Promise.resolve(null),
-      ]);
+      console.log(`[LibrusContext loadAllData] Fetching fresh data in parallel for initialWeek: ${initialWeekStart}, currentWeek: ${currentWeekStart}`);
+      const [stu, grd, attData, freshWeek, currentCalendarWeek, freshInbox, freshSent] =
+        await Promise.all([
+          librusClient.getStudentInfo(),
+          librusClient.getGrades(),
+          librusClient.getAttendanceAndRealizations(),
+          librusClient.getWeek(initialWeekStart),
+          currentWeekStart !== initialWeekStart
+            ? librusClient.getWeek(currentWeekStart)
+            : Promise.resolve(null),
+          librusClient.getMessages('inbox'),
+          librusClient.getMessages('sent'),
+        ]);
+
+      console.log(`[LibrusContext loadAllData] Results: student=${stu?.name ?? 'null'}, grades=${grd?.length ?? 0}, freshWeek=${freshWeek?.weekStart ?? 'null'} (lessons: ${freshWeek?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0}), currentCalendarWeek=${currentCalendarWeek?.weekStart ?? 'null'}`);
 
       if (stu) setStudent(stu);
-      if (grd) setGrades(grd);
+      if (grd && grd.length > 0) setGrades(grd);
+      if (freshInbox) setInboxMessages(freshInbox);
+      if (freshSent) setSentMessages(freshSent);
 
       if (attData) {
-        marksRef.current = attData.marks;
-        realizationsRef.current = attData.realizations;
+        if (attData.marks.length > 0) {
+          marksRef.current = attData.marks;
+          setAttendanceMarks(attData.marks);
+        }
+        if (attData.realizations.length > 0) {
+          realizationsRef.current = attData.realizations;
+          setRealizations(attData.realizations);
+        }
       }
 
       const newWeeksMap: Record<string, WeekSchedule> = { ...getAllCachedWeeks() };
 
-      if (currentCalendarWeek) {
+      if (currentCalendarWeek && weekHasLessons(currentCalendarWeek)) {
         const mergedCurrentWeek = mergeAttendanceAndTopics(
           currentCalendarWeek,
           marksRef.current,
@@ -207,7 +319,7 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         newWeeksMap[currentWeekStart] = mergedCurrentWeek;
       }
 
-      if (freshWeek) {
+      if (freshWeek && weekHasLessons(freshWeek)) {
         const mergedWeek = mergeAttendanceAndTopics(
           freshWeek,
           marksRef.current,
@@ -216,6 +328,14 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         saveCachedWeek(mergedWeek);
         newWeeksMap[initialWeekStart] = mergedWeek;
         setTimetable(mergedWeek.days);
+      } else {
+        const fallbackWeek =
+          (newWeeksMap[initialWeekStart] && weekHasLessons(newWeeksMap[initialWeekStart]))
+            ? newWeeksMap[initialWeekStart]
+            : Object.values(newWeeksMap).find((w) => weekHasLessons(w));
+        if (fallbackWeek && weekHasLessons(fallbackWeek)) {
+          setTimetable(fallbackWeek.days);
+        }
       }
 
       if (Object.keys(newWeeksMap).length > 0) {
@@ -238,16 +358,38 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             },
             newWeeksMap
           );
-          saveCachedAttendanceStats(finalStats);
+          if (isValidAttendanceStats(finalStats)) {
+            saveCachedAttendanceStats(finalStats);
+          }
         }
-        setAttendanceStats(finalStats);
+        if (isValidAttendanceStats(finalStats)) {
+          setAttendanceStats(finalStats);
+        }
       }
     } catch (err) {
       console.error('Failed to load Librus data', err);
     } finally {
+      isSyncingRef.current = false;
       setIsLoading(false);
       setIsRefreshing(false);
     }
+  };
+
+  const clearLocalCacheAndRefresh = async () => {
+    clearDataCachesOnly();
+    await librusClient.clearGradesCache();
+    marksRef.current = [];
+    realizationsRef.current = [];
+    setGrades([]);
+    setTimetable([]);
+    setWeeks({});
+    setAttendanceStats(null);
+    setAttendanceMarks([]);
+    setRealizations([]);
+    setInboxMessages([]);
+    setSentMessages([]);
+    isSyncingRef.current = false;
+    await loadAllData(true);
   };
 
   useEffect(() => {
@@ -286,6 +428,10 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setTimetable([]);
     setWeeks({});
     setAttendanceStats(null);
+    setAttendanceMarks([]);
+    setRealizations([]);
+    setInboxMessages([]);
+    setSentMessages([]);
     marksRef.current = [];
     realizationsRef.current = [];
     setIsAuthenticated(false);
@@ -300,7 +446,16 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         timetable,
         weeks,
         attendanceStats,
+        attendanceMarks,
+        realizations,
+        inboxMessages,
+        sentMessages,
+        unreadMessagesCount,
+        hasLowSubjectAttendance,
         loadWeek,
+        loadMessages,
+        markMessageAsReadLocal,
+        clearLocalCacheAndRefresh,
         isAuthenticated,
         isLoading,
         isRefreshing,

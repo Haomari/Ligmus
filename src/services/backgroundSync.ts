@@ -12,7 +12,7 @@ import {
   WeekSchedule,
 } from '@/types/librus';
 import { addDays, getMonday, toISODate } from '@/utils/dates';
-import { getCachedAttendanceMarks, getCachedWeek } from './fileCache';
+import { getCachedAttendanceMarks, getCachedMessages, getCachedWeek } from './fileCache';
 import { librusClient } from './librusClient';
 
 export const BACKGROUND_SYNC_TASK = 'LIGMUS_BACKGROUND_SYNC_TASK';
@@ -97,6 +97,14 @@ export async function setupNotificationChannelAsync(): Promise<void> {
       importance: 7, // AndroidImportance.MAX
       vibrationPattern: [0, 250, 250, 250],
       lightColor: '#f59e0b',
+      sound: 'default',
+      showBadge: true,
+    });
+    await Notifications.setNotificationChannelAsync('librus-messages', {
+      name: 'Wiadomości Librus',
+      importance: 7, // AndroidImportance.MAX
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#60a5fa',
       sound: 'default',
       showBadge: true,
     });
@@ -472,6 +480,30 @@ export async function executeSmartSync(): Promise<number> {
 
       await checkDayDiffs(freshTodayWeek, todayIso, 'dziś');
       await checkDayDiffs(freshTomorrowWeek, tomorrowIso, 'jutro');
+    }
+
+    // --- 3. MESSAGES DIFF ---
+    const oldInbox = getCachedMessages('inbox') ?? [];
+    const oldMessageIds = new Set<string>(oldInbox.map((m) => m.id));
+    const freshInbox = await librusClient.getMessages('inbox');
+    if (freshInbox && oldMessageIds.size > 0) {
+      const newUnread = freshInbox.filter((m) => !oldMessageIds.has(m.id) && m.isUnread);
+      if (newUnread.length > 0) {
+        foundNewData = true;
+        if (Notifications) {
+          for (const msg of newUnread.slice(0, 3)) {
+            await Notifications.scheduleNotificationAsync({
+              content: {
+                title: `Nowa wiadomość: ${msg.sender}`,
+                body: msg.subject,
+                data: { url: '/messages' },
+                sound: 'default',
+              },
+              trigger: Platform.OS === 'android' ? { channelId: 'librus-messages' } : null,
+            });
+          }
+        }
+      }
     }
 
     return foundNewData ? BackgroundSyncResult.NewData : BackgroundSyncResult.NoData;

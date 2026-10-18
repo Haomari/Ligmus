@@ -151,3 +151,24 @@ export function formatWeekRangeLabel(weekStartIso: string): string {
   }
   return `${monDay} ${monMonth} – ${friDay} ${friMonth}`;
 }
+
+export const POLISH_DAY_ABBREV_DOT = [
+  'pon.',
+  'wt.',
+  'śr.',
+  'czw.',
+  'pt.',
+  'sob.',
+  'niedz.',
+] as const;
+
+/**
+ * Formats an ISO date into e.g. "2026-09-30 (śr.)" for excuse templates.
+ */
+export function formatExcuseDayLabel(isoDate: string): string {
+  const d = parseISODate(isoDate);
+  const dayIndex = (d.getDay() + 6) % 7;
+  const abbrev = POLISH_DAY_ABBREV_DOT[dayIndex] ?? '';
+  return `${isoDate} (${abbrev})`;
+}
+

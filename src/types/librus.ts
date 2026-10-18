@@ -52,6 +52,7 @@ export interface AttendanceMark {
   name: string;          // e.g. "Nieobecność usprawiedliwiona"
   addedBy?: string;
   addedAt?: string;
+  semester?: 1 | 2;
 }
 
 export interface LessonRealization {
@@ -63,6 +64,7 @@ export interface LessonRealization {
   teacher?: string;
   attendanceSymbol?: string;
   attendanceId?: string;
+  semester?: 1 | 2;
 }
 
 export interface TimetableLesson {
@@ -109,6 +111,68 @@ export interface AttendanceStats {
   late: number;
   exempt: number;
   total: number;
+}
+
+export type SemesterFilter = 1 | 2 | 'all' | 'sem1' | 'sem2' | 'year';
+
+export interface SubjectAttendanceStat {
+  subject: string;
+  present: number;
+  late: number;
+  absent: number;
+  excused: number;
+  exempt: number;
+  total: number;
+  percent: number;
+  status: 'ok' | 'warning' | 'danger';
+  canMissFor50: number;
+  mustAttendFor50: number;
+}
+
+export type MessageFolder = 'inbox' | 'sent';
+
+export interface LibrusAttachment {
+  name: string;
+  path: string;
+}
+
+export interface LibrusMessageSummary {
+  id: string;
+  folderId: 5 | 6;
+  sender: string;
+  senderOrRecipient: string;
+  subject: string;
+  date: string;
+  sentAt: string;
+  isUnread: boolean;
+  readByRecipient?: boolean;
+  readAt?: string;
+  hasAttachment?: boolean;
+}
+
+export interface LibrusMessageDetail extends LibrusMessageSummary {
+  body: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  recipient?: string;
+  readAt?: string;
+  readStatusText?: string;
+  attachments?: LibrusAttachment[];
+}
+
+export interface MessageRecipient {
+  id: string;
+  name: string;
+  group: 'wychowawca' | 'nauczyciel' | 'sekretariat' | 'bibliotekarz' | 'admin';
+}
+
+export interface ExcuseTemplateSettings {
+  subject: string;
+  customEducatorName: string;
+  introText: string;
+  reasonText: string;
+  customSignature: string;
+  signatureOverride?: string;
 }
 
 export interface StudentInfo {

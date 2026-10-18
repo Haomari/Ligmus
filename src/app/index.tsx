@@ -19,6 +19,7 @@ import {
   parseHM,
   toISODate,
 } from '@/utils/dates';
+import { getAllCachedWeeks } from '@/services/fileCache';
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -31,6 +32,7 @@ export default function HomeScreen() {
     attendanceStats,
     isAuthenticated,
     isLoading,
+    isRefreshing,
     refreshData,
   } = useLibrus();
 
@@ -40,7 +42,7 @@ export default function HomeScreen() {
     }
   }, [isLoading, isAuthenticated]);
 
-  const { nextLesson, nextLessonDayLabel } = useMemo((): {
+  const { nextLesson } = useMemo((): {
     nextLesson: TimetableLesson | null;
     nextLessonDayLabel: string | null;
   } => {
@@ -50,10 +52,14 @@ export default function HomeScreen() {
 
     const targetDate = getInitialSchoolDate(now);
     const targetWeekStart = toISODate(getMonday(targetDate));
-    const days: DaySchedule[] = weeks[targetWeekStart]?.days ?? timetable ?? [];
+    const currentWeekStart = toISODate(getMonday(now));
 
-    // 1. Check remaining non-cancelled lessons today
-    const todaySchedule = days.find((d) => d.date === todayIso);
+    const hasLessons = (dList?: DaySchedule[]) =>
+      Boolean(dList && dList.some((d) => d.lessons && d.lessons.length > 0));
+
+    // Check remaining non-cancelled lessons today first
+    const todayDays = weeks[currentWeekStart]?.days ?? timetable ?? [];
+    const todaySchedule = todayDays.find((d) => d.date === todayIso);
     if (todaySchedule) {
       const upcomingToday = todaySchedule.lessons.find(
         (l) => !l.isCancelled && parseHM(l.endTime || '23:59') >= nowMin
@@ -63,7 +69,23 @@ export default function HomeScreen() {
       }
     }
 
-    // 2. Otherwise find the first non-cancelled lesson on a future school day in this/next week
+    // Choose best candidate week for upcoming lessons
+    let days: DaySchedule[] = [];
+    if (hasLessons(weeks[targetWeekStart]?.days)) {
+      days = weeks[targetWeekStart].days;
+    } else if (hasLessons(timetable)) {
+      days = timetable;
+    } else {
+      const allC = getAllCachedWeeks();
+      const anyCachedWeek =
+        Object.values(weeks).find((w) => hasLessons(w?.days)) ??
+        Object.values(allC).find((w) => hasLessons(w?.days));
+      if (anyCachedWeek) {
+        days = anyCachedWeek.days;
+      }
+    }
+
+    // Find the first non-cancelled lesson on a future school day in target week
     for (const d of days) {
       if (d.date > todayIso) {
         const firstActive = d.lessons.find((l) => !l.isCancelled);
@@ -73,7 +95,7 @@ export default function HomeScreen() {
       }
     }
 
-    // 3. Fallback to first non-cancelled lesson in days
+    // Fallback to first non-cancelled lesson in days (e.g. Monday morning template)
     for (const d of days) {
       const firstActive = d.lessons.find((l) => !l.isCancelled);
       if (firstActive) {
@@ -82,7 +104,7 @@ export default function HomeScreen() {
     }
 
     return { nextLesson: null, nextLessonDayLabel: null };
-  }, [weeks, timetable]);
+  }, [weeks, timetable, isRefreshing]);
 
   const attendanceColor = useMemo(() => {
     const pct = attendanceStats?.percent;
@@ -107,7 +129,11 @@ export default function HomeScreen() {
         ]}
         showsVerticalScrollIndicator={false}
         refreshControl={
-          <RefreshControl refreshing={isLoading} onRefresh={refreshData} tintColor="#3b82f6" />
+          <RefreshControl
+            refreshing={isLoading || isRefreshing}
+            onRefresh={refreshData}
+            tintColor="#3b82f6"
+          />
         }>
         {/* Header */}
         <View style={styles.header}>
@@ -117,11 +143,6 @@ export default function HomeScreen() {
               {student?.name ? `${student.name} • ` : ''}{student?.classGroup || 'Librus Synergia'}{student?.studentNumber ? ` • Nr ${student.studentNumber}` : ''}
             </Text>
           </View>
-          <TouchableOpacity
-            style={styles.settingsIconButton}
-            onPress={() => router.push('/settings' as any)}>
-            <Ionicons name="settings-outline" size={22} color="#94a3b8" />
-          </TouchableOpacity>
         </View>
 
         {/* Lucky Number Card */}
@@ -142,7 +163,7 @@ export default function HomeScreen() {
         {/* Frekwencja % Tile */}
         <TouchableOpacity
           activeOpacity={0.85}
-          onPress={() => router.push('/timetable' as any)}
+          onPress={() => router.push('/attendance' as any)}
           style={[styles.card, styles.attendanceCard]}>
           <View style={styles.attendanceHeaderRow}>
             <View style={styles.attendanceTitleCol}>

@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -22,15 +23,34 @@ import {
   sendTestNotification,
   SyncSettings,
 } from '@/services/backgroundSync';
+import {
+  DEFAULT_EXCUSE_SETTINGS,
+  getCurrentSchoolYearId,
+  getExcuseSettings,
+  saveExcuseSettings,
+} from '@/services/fileCache';
+import { ExcuseTemplateSettings } from '@/types/librus';
+import { formatShortStudentSignature } from '@/components/message-compose-modal';
 
 export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { student, isLoading, refreshData, logout } = useLibrus();
+  const {
+    student,
+    isLoading,
+    refreshData,
+    clearLocalCacheAndRefresh,
+    logout,
+  } = useLibrus();
+
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(DEFAULT_SYNC_SETTINGS);
+  const [excuseTemplate, setExcuseTemplate] = useState<ExcuseTemplateSettings>(
+    DEFAULT_EXCUSE_SETTINGS
+  );
 
   useEffect(() => {
     getSyncSettings().then(setSyncSettings);
+    setExcuseTemplate(getExcuseSettings());
   }, []);
 
   const handleToggleSync = async (enabled: boolean) => {
@@ -39,7 +59,7 @@ export default function SettingsScreen() {
       if (!granted) {
         Alert.alert(
           'Brak uprawnień',
-          'Aplikacja wymaga uprawnień do powiadomień, aby móc informować Cię o nowych ocenach w tle.'
+          'Aplikacja wymaga uprawnień do powiadomień, aby móc informować Cię o nowych ocenach i wiadomościach w tle.'
         );
         return;
       }
@@ -85,6 +105,35 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleSaveExcuseTemplate = () => {
+    saveExcuseSettings(excuseTemplate);
+    Alert.alert('Zapisano', 'Szablon usprawiedliwień został zapisany.');
+  };
+
+  const handleResetExcuseTemplate = () => {
+    setExcuseTemplate(DEFAULT_EXCUSE_SETTINGS);
+    saveExcuseSettings(DEFAULT_EXCUSE_SETTINGS);
+    Alert.alert('Przywrócono', 'Przywrócono domyślny szablon usprawiedliwień.');
+  };
+
+  const handleClearCache = () => {
+    Alert.alert(
+      'Wyczyść pamięć podręczną',
+      'Czy chcesz wyczyścić zapisane dane ocen, planu lekcji, frekwencji oraz wiadomości i pobrać je na nowo z Librusa? Twoje dane logowania oraz szablony zostaną zachowane.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Wyczyść i odśwież',
+          style: 'destructive',
+          onPress: async () => {
+            await clearLocalCacheAndRefresh();
+            Alert.alert('Gotowe', 'Pamięć podręczna została wyczyszczona i odświeżona.');
+          },
+        },
+      ]
+    );
+  };
+
   const handleLogout = () => {
     Alert.alert(
       'Wylogowanie',
@@ -103,6 +152,9 @@ export default function SettingsScreen() {
     );
   };
 
+  const autoSignature = formatShortStudentSignature(student?.name);
+  const schoolYearId = getCurrentSchoolYearId();
+
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.header}>
@@ -110,7 +162,11 @@ export default function SettingsScreen() {
       </View>
 
       <ScrollView
-        contentContainerStyle={[styles.container, { paddingBottom: Math.max(insets.bottom + 24, 40) }]}
+        contentContainerStyle={[
+          styles.container,
+          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+        ]}
+        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}>
         {/* Profile Card */}
         <View style={styles.card}>
@@ -122,7 +178,9 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.profileInfo}>
               <Text style={styles.studentName}>{student?.name || 'Uczeń'}</Text>
-              <Text style={styles.studentClass}>{student?.classGroup || 'Konto Librus'}</Text>
+              <Text style={styles.studentClass}>
+                {student?.classGroup || 'Konto Librus'}
+              </Text>
               {student?.educator ? (
                 <Text style={styles.studentMeta}>
                   Wychowawca: {student.educator}
@@ -132,21 +190,107 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Account / Connection Status */}
+        {/* Excuse Template Settings */}
         <View style={styles.section}>
-          <Text style={styles.sectionHeader}>Konto i połączenie</Text>
+          <Text style={styles.sectionHeader}>Szablon usprawiedliwień</Text>
+
+          <View style={[styles.card, { gap: 12 }]}>
+            <Text style={styles.templateHint}>
+              Dostosuj domyślny tekst generowany po kliknięciu przycisku „Usprawiedliwienie” w zakładce Wiadomości.
+            </Text>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Temat wiadomości</Text>
+              <TextInput
+                value={excuseTemplate.subject}
+                onChangeText={(subject) =>
+                  setExcuseTemplate((prev) => ({ ...prev, subject }))
+                }
+                placeholder="Usprawiedliwienie"
+                placeholderTextColor="#64748b"
+                style={styles.textInput}
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>
+                Wychowawca klasy (opcjonalnie nadpisz)
+              </Text>
+              <TextInput
+                value={excuseTemplate.customEducatorName}
+                onChangeText={(customEducatorName) =>
+                  setExcuseTemplate((prev) => ({ ...prev, customEducatorName }))
+                }
+                placeholder={
+                  student?.educator
+                    ? `Domyślnie z Librusa: ${student.educator}`
+                    : 'Domyślnie wykrywany z Librusa'
+                }
+                placeholderTextColor="#64748b"
+                style={styles.textInput}
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Tekst powitania (przed listą dat)</Text>
+              <TextInput
+                value={excuseTemplate.introText}
+                onChangeText={(introText) =>
+                  setExcuseTemplate((prev) => ({ ...prev, introText }))
+                }
+                multiline
+                style={[styles.textInput, styles.textInputMultiline]}
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Powód nieobecności (po liście dat)</Text>
+              <TextInput
+                value={excuseTemplate.reasonText}
+                onChangeText={(reasonText) =>
+                  setExcuseTemplate((prev) => ({ ...prev, reasonText }))
+                }
+                multiline
+                style={[styles.textInput, styles.textInputMultiline]}
+              />
+            </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Podpis pod wiadomością</Text>
+              <TextInput
+                value={excuseTemplate.customSignature}
+                onChangeText={(customSignature) =>
+                  setExcuseTemplate((prev) => ({ ...prev, customSignature }))
+                }
+                placeholder={`Domyślnie z Librusa: ${autoSignature}`}
+                placeholderTextColor="#64748b"
+                style={styles.textInput}
+              />
+            </View>
+
+            <View style={styles.templateButtonsRow}>
+              <TouchableOpacity
+                onPress={handleResetExcuseTemplate}
+                style={styles.resetTemplateBtn}>
+                <Text style={styles.resetTemplateBtnText}>Domyślne</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleSaveExcuseTemplate}
+                style={styles.saveTemplateBtn}>
+                <Ionicons name="checkmark-circle-outline" size={17} color="#ffffff" />
+                <Text style={styles.saveTemplateBtnText}>Zapisz szablon</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+        {/* Account / Connection Status & School Year Cache */}
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>
+            Konto i pamięć podręczna ({schoolYearId})
+          </Text>
 
           <View style={styles.card}>
-            <TouchableOpacity
-              style={styles.actionRow}
-              onPress={() => router.push('/login' as any)}>
-              <Ionicons name="key-outline" size={20} color="#38bdf8" />
-              <Text style={styles.actionText}>Zmień konto / Zaloguj ponownie</Text>
-              <Ionicons name="chevron-forward" size={18} color="#64748b" />
-            </TouchableOpacity>
-
-            <View style={styles.divider} />
-
             <TouchableOpacity
               style={styles.actionRow}
               onPress={async () => {
@@ -157,6 +301,31 @@ export default function SettingsScreen() {
               <Text style={styles.actionText}>
                 {isLoading ? 'Odświeżanie...' : 'Wymuś odświeżenie danych'}
               </Text>
+              <Ionicons name="chevron-forward" size={18} color="#64748b" />
+            </TouchableOpacity>
+
+            <View style={styles.divider} />
+
+            <TouchableOpacity
+              style={styles.actionRow}
+              onPress={handleClearCache}>
+              <Ionicons name="trash-outline" size={20} color="#f59e0b" />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.actionText}>Wyczyść pamięć podręczną</Text>
+                <Text style={styles.actionSubText}>
+                  Automatyczny reset następuje co roku 1 września ({schoolYearId})
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#64748b" />
+            </TouchableOpacity>
+
+            <View style={styles.divider} />
+
+            <TouchableOpacity
+              style={styles.actionRow}
+              onPress={() => router.push('/login' as any)}>
+              <Ionicons name="key-outline" size={20} color="#38bdf8" />
+              <Text style={styles.actionText}>Zmień konto / Zaloguj ponownie</Text>
               <Ionicons name="chevron-forward" size={18} color="#64748b" />
             </TouchableOpacity>
           </View>
@@ -184,7 +353,7 @@ export default function SettingsScreen() {
               <View style={styles.switchTextCol}>
                 <Text style={styles.switchTitle}>Powiadomienia w tle</Text>
                 <Text style={styles.switchDesc}>
-                  Automatycznie sprawdza nowe oceny bez konieczności otwierania aplikacji
+                  Automatycznie sprawdza nowe oceny, wiadomości i zmiany w planie
                 </Text>
               </View>
               <Switch
@@ -269,7 +438,7 @@ export default function SettingsScreen() {
           <View style={styles.card}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Wersja</Text>
-              <Text style={styles.infoValue}>v0.3.0-alpha</Text>
+              <Text style={styles.infoValue}>v0.5.5-alpha</Text>
             </View>
           </View>
         </View>
@@ -352,38 +521,74 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   sectionHeader: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '700',
     color: '#94a3b8',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginLeft: 4,
   },
-  settingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  settingIconContainer: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: '#334155',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  settingTextCol: {
-    flex: 1,
-  },
-  settingTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#f8fafc',
-  },
-  settingDesc: {
+  templateHint: {
     fontSize: 12,
     color: '#94a3b8',
-    marginTop: 2,
+    lineHeight: 17,
+  },
+  inputGroup: {
+    gap: 5,
+  },
+  inputLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#cbd5e1',
+  },
+  textInput: {
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    color: '#f8fafc',
+    fontSize: 13,
+  },
+  textInputMultiline: {
+    minHeight: 58,
+    textAlignVertical: 'top',
+  },
+  templateButtonsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  resetTemplateBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 11,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  resetTemplateBtnText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  saveTemplateBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#3b82f6',
+    paddingVertical: 10,
+    borderRadius: 11,
+  },
+  saveTemplateBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   divider: {
     height: 1,
@@ -401,6 +606,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#f8fafc',
     fontWeight: '600',
+  },
+  actionSubText: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginTop: 2,
   },
   infoRow: {
     flexDirection: 'row',
