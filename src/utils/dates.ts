@@ -1,3 +1,5 @@
+import { DaySchedule } from '@/types/librus';
+
 export const POLISH_DAY_NAMES = [
   'Poniedziałek',
   'Wtorek',
@@ -170,5 +172,22 @@ export function formatExcuseDayLabel(isoDate: string): string {
   const dayIndex = (d.getDay() + 6) % 7;
   const abbrev = POLISH_DAY_ABBREV_DOT[dayIndex] ?? '';
   return `${isoDate} (${abbrev})`;
+}
+
+/**
+ * Builds an empty Monday–Friday DaySchedule[] array for the week starting on `weekStartIso` ("YYYY-MM-DD").
+ */
+export function buildEmptyWeekDays(weekStartIso: string): DaySchedule[] {
+  const mon = parseISODate(weekStartIso);
+  return Array.from({ length: 5 }, (_, idx) => {
+    const d = addDays(mon, idx);
+    return {
+      dayId: idx + 1,
+      dayName: POLISH_DAY_NAMES[idx],
+      shortName: POLISH_DAY_SHORT[idx],
+      date: toISODate(d),
+      lessons: [],
+    };
+  });
 }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -14,17 +14,20 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLibrus } from '@/context/LibrusContext';
 import { cleanLibrusPersonName, librusClient } from '@/services/librusClient';
 import {
-  DEFAULT_EXCUSE_SETTINGS,
-  getExcuseSettings,
+  DEFAULT_EXCUSE_PRESETS,
+  getExcusePresetsStore,
   getSentExcuseDates,
   markExcuseDatesAsSent,
+  saveExcusePresetsStore,
 } from '@/services/fileCache';
 import {
-  ExcuseTemplateSettings,
+  ExcusePreset,
+  ExcusePresetsStore,
   LibrusMessageDetail,
   MessageRecipient,
 } from '@/types/librus';
@@ -52,6 +55,13 @@ export function formatShortStudentSignature(fullName?: string): string {
   return cleaned;
 }
 
+const INITIAL_EXCUSE_STORE: ExcusePresetsStore = {
+  activePresetId: DEFAULT_EXCUSE_PRESETS[0].id,
+  customEducatorName: '',
+  customSignature: '',
+  presets: DEFAULT_EXCUSE_PRESETS,
+};
+
 export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
   visible,
   mode,
@@ -59,9 +69,11 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
   onClose,
   onSentSuccess,
 }) => {
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const { student, attendanceMarks } = useLibrus();
   const scrollViewRef = useRef<ScrollView>(null);
+  const wasVisibleRef = useRef(false);
 
   const [recipients, setRecipients] = useState<MessageRecipient[]>([]);
   const [loadingRecipients, setLoadingRecipients] = useState(false);
@@ -75,8 +87,9 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   // Auto-Excuse state
-  const [excuseSettings, setExcuseSettings] = useState<ExcuseTemplateSettings>(
-    DEFAULT_EXCUSE_SETTINGS
+  const [excuseStore, setExcuseStore] = useState<ExcusePresetsStore>(INITIAL_EXCUSE_STORE);
+  const [selectedPresetId, setSelectedPresetId] = useState<string>(
+    DEFAULT_EXCUSE_PRESETS[0].id
   );
   const [sentDatesSet, setSentDatesSet] = useState<Set<string>>(new Set());
   const [selectedAbsenceDates, setSelectedAbsenceDates] = useState<string[]>([]);
@@ -117,107 +130,149 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
       .sort((a, b) => a.date.localeCompare(b.date));
   }, [attendanceMarks]);
 
-  const buildExcuseBody = (
-    datesToInclude: string[],
-    tpl: ExcuseTemplateSettings
-  ): string => {
-    const sorted = [...datesToInclude].sort((a, b) => a.localeCompare(b));
-    const dateLines =
-      sorted.length > 0
-        ? sorted.map((d) => `- ${formatExcuseDayLabel(d)}`).join('\n')
-        : '- (brak zaznaczonych dni)';
-    const sig =
-      tpl.customSignature.trim() || formatShortStudentSignature(student?.name);
-    return `${tpl.introText.trim()}\n${dateLines}\n\n${tpl.reasonText.trim()}\n\nZ poważaniem,\n${sig}`;
-  };
+  const activePreset: ExcusePreset = useMemo(() => {
+    return (
+      excuseStore.presets.find((p) => p.id === selectedPresetId) ??
+      excuseStore.presets[0] ??
+      DEFAULT_EXCUSE_PRESETS[0]
+    );
+  }, [excuseStore.presets, selectedPresetId]);
+
+  const buildExcuseBody = useCallback(
+    (
+      datesToInclude: string[],
+      preset: ExcusePreset,
+      customSignature: string
+    ): string => {
+      const sorted = [...datesToInclude].sort((a, b) => a.localeCompare(b));
+      const dateLines =
+        sorted.length > 0
+          ? sorted.map((d) => `- ${formatExcuseDayLabel(d)}`).join('\n')
+          : '- (brak zaznaczonych dni)';
+      const sig =
+        customSignature.trim() || formatShortStudentSignature(student?.name);
+      return `${preset.introText.trim()}\n${dateLines}\n\n${preset.reasonText.trim()}\n\nZ poważaniem,\n${sig}`;
+    },
+    [student]
+  );
 
   useEffect(() => {
-    if (!visible) return;
-
-    const tpl = getExcuseSettings();
-    const alreadySent = new Set(getSentExcuseDates());
-    setExcuseSettings(tpl);
-    setSentDatesSet(alreadySent);
-
-    if (mode === 'excuse') {
-      setSubject(tpl.subject || 'Usprawiedliwienie');
-      const unsentDates = absenceDaysList
-        .map((d) => d.date)
-        .filter((d) => !alreadySent.has(d));
-      const initialDates =
-        unsentDates.length > 0
-          ? unsentDates
-          : absenceDaysList.map((d) => d.date);
-      setSelectedAbsenceDates(initialDates);
-      setBody(buildExcuseBody(initialDates, tpl));
-      setShowRecipientPicker(false);
-    } else if (mode === 'reply' && replyToMessage) {
-      const cleanSubj = replyToMessage.subject.replace(/^Re:\s*/i, '');
-      setSubject(`Re: ${cleanSubj}`);
-      setBody(
-        `\n\n--- W odpowiedzi na wiadomość z dnia ${replyToMessage.sentAt} ---\n${replyToMessage.body}`
-      );
-      setShowRecipientPicker(false);
-    } else {
-      setSubject('');
-      setBody('');
-      setSelectedRecipientIds([]);
-      setShowRecipientPicker(true);
+    if (!visible) {
+      wasVisibleRef.current = false;
+      return;
     }
+    if (wasVisibleRef.current) return;
+    wasVisibleRef.current = true;
 
-    // Load recipients from Synergia
     let cancelled = false;
-    setLoadingRecipients(true);
-    librusClient
-      .getMessageRecipients()
-      .then((list) => {
-        if (cancelled) return;
-        setRecipients(list);
 
-        if (mode === 'excuse') {
-          const customEdu = tpl.customEducatorName.trim().toLowerCase();
-          const studentEdu = (student?.educator || '').trim().toLowerCase();
-          const matchedEducator =
-            (customEdu &&
-              list.find((r) => r.name.toLowerCase().includes(customEdu))) ||
-            list.find((r) => r.group === 'wychowawca') ||
-            (studentEdu &&
-              list.find((r) =>
-                r.name
-                  .toLowerCase()
-                  .includes(studentEdu.split(' ')[0] || studentEdu)
-              ));
-          if (matchedEducator) {
-            setSelectedRecipientIds([matchedEducator.id]);
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+
+      const store = getExcusePresetsStore();
+      const initialPreset =
+        store.presets.find((p) => p.id === store.activePresetId) ??
+        store.presets[0] ??
+        DEFAULT_EXCUSE_PRESETS[0];
+      const alreadySent = new Set(getSentExcuseDates());
+      setExcuseStore(store);
+      setSelectedPresetId(initialPreset.id);
+      setSentDatesSet(alreadySent);
+
+      if (mode === 'excuse') {
+        setSubject(initialPreset.subject || 'Usprawiedliwienie');
+        const unsentDates = absenceDaysList
+          .map((d) => d.date)
+          .filter((d) => !alreadySent.has(d));
+        const initialDates =
+          unsentDates.length > 0
+            ? unsentDates
+            : absenceDaysList.map((d) => d.date);
+        setSelectedAbsenceDates(initialDates);
+        setBody(buildExcuseBody(initialDates, initialPreset, store.customSignature));
+        setShowRecipientPicker(false);
+      } else if (mode === 'reply' && replyToMessage) {
+        const cleanSubj = replyToMessage.subject.replace(/^Re:\s*/i, '');
+        setSubject(`Re: ${cleanSubj}`);
+        setBody(
+          `\n\n--- W odpowiedzi na wiadomość z dnia ${replyToMessage.sentAt} ---\n${replyToMessage.body}`
+        );
+        setShowRecipientPicker(false);
+      } else {
+        setSubject('');
+        setBody('');
+        setSelectedRecipientIds([]);
+        setShowRecipientPicker(true);
+      }
+
+      setLoadingRecipients(true);
+      librusClient
+        .getMessageRecipients()
+        .then((list) => {
+          if (cancelled) return;
+          setRecipients(list);
+
+          if (mode === 'excuse') {
+            const customEdu = store.customEducatorName.trim().toLowerCase();
+            const studentEdu = (student?.educator || '').trim().toLowerCase();
+            const matchedEducator =
+              (customEdu &&
+                list.find((r) => r.name.toLowerCase().includes(customEdu))) ||
+              list.find((r) => r.group === 'wychowawca') ||
+              (studentEdu &&
+                list.find((r) =>
+                  r.name
+                    .toLowerCase()
+                    .includes(studentEdu.split(' ')[0] || studentEdu)
+                ));
+            if (matchedEducator) {
+              setSelectedRecipientIds([matchedEducator.id]);
+            }
+          } else if (mode === 'reply' && replyToMessage) {
+            const senderLower = cleanLibrusPersonName(replyToMessage.sender).toLowerCase();
+            const senderLastName = senderLower.split(' ')[0] || senderLower;
+            const match =
+              list.find((r) => r.name.toLowerCase() === senderLower) ||
+              list.find((r) => r.name.toLowerCase().includes(senderLastName));
+            if (match) {
+              setSelectedRecipientIds([match.id]);
+            }
           }
-        } else if (mode === 'reply' && replyToMessage) {
-          const senderLower = cleanLibrusPersonName(replyToMessage.sender).toLowerCase();
-          const senderLastName = senderLower.split(' ')[0] || senderLower;
-          const match =
-            list.find((r) => r.name.toLowerCase() === senderLower) ||
-            list.find((r) => r.name.toLowerCase().includes(senderLastName));
-          if (match) {
-            setSelectedRecipientIds([match.id]);
-          }
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingRecipients(false);
-      });
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingRecipients(false);
+        });
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [visible, mode, replyToMessage?.id]);
+  }, [visible, mode, replyToMessage, absenceDaysList, buildExcuseBody, student]);
 
   const toggleAbsenceDate = (isoDate: string) => {
     setSelectedAbsenceDates((prev) => {
       const next = prev.includes(isoDate)
         ? prev.filter((d) => d !== isoDate)
         : [...prev, isoDate];
-      setBody(buildExcuseBody(next, excuseSettings));
+      setBody(buildExcuseBody(next, activePreset, excuseStore.customSignature));
       return next;
     });
+  };
+
+  const handleSelectExcusePreset = (preset: ExcusePreset) => {
+    setSelectedPresetId(preset.id);
+    setSubject(preset.subject || 'Usprawiedliwienie');
+    setBody(buildExcuseBody(selectedAbsenceDates, preset, excuseStore.customSignature));
+    const updatedStore = { ...excuseStore, activePresetId: preset.id };
+    setExcuseStore(updatedStore);
+    saveExcusePresetsStore(updatedStore);
+  };
+
+  const handleOpenTemplateSettings = () => {
+    onClose();
+    setTimeout(() => {
+      router.push('/settings' as any);
+    }, 120);
   };
 
   const toggleRecipient = (id: string) => {
@@ -243,7 +298,7 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
       return selectedRecipientLabels.join('; ');
     }
     if (mode === 'excuse') {
-      const custom = excuseSettings.customEducatorName.trim();
+      const custom = excuseStore.customEducatorName.trim();
       if (custom) return `${cleanLibrusPersonName(custom)} (wychowawca klasy)`;
       if (student?.educator)
         return `${cleanLibrusPersonName(student.educator)} (wychowawca klasy)`;
@@ -255,8 +310,8 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
   }, [
     selectedRecipientLabels,
     mode,
-    excuseSettings.customEducatorName,
-    student?.educator,
+    excuseStore.customEducatorName,
+    student,
     replyToMessage,
   ]);
 
@@ -347,33 +402,31 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
           <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
             <Ionicons name="close" size={22} color="#e2e8f0" />
           </TouchableOpacity>
-          <Text style={styles.topTitle}>
+          <Text style={styles.topTitle} numberOfLines={1}>
             {mode === 'excuse'
-              ? 'Generator usprawiedliwienia'
+              ? 'Usprawiedliwienie'
               : mode === 'reply'
-                ? 'Odpowiedz na wiadomość'
+                ? 'Odpowiedź'
                 : 'Nowa wiadomość'}
           </Text>
-          <TouchableOpacity
-            disabled={sending}
-            onPress={handleSend}
-            style={[styles.sendTopBtn, sending && { opacity: 0.6 }]}>
-            {sending ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <>
-                <Ionicons name="send" size={14} color="#ffffff" />
-                <Text style={styles.sendTopBtnText}>Wyślij</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          {mode === 'excuse' ? (
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={handleOpenTemplateSettings}
+              style={styles.settingsTopBtn}>
+              <Ionicons name="options-outline" size={16} color="#38bdf8" />
+              <Text style={styles.settingsTopBtnText}>Szablon</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={{ width: 38 }} />
+          )}
         </View>
 
         <ScrollView
           ref={scrollViewRef}
           contentContainerStyle={[
             styles.scrollContent,
-            { paddingBottom: Math.max(keyboardHeight + 60, 60) },
+            { paddingBottom: Math.max(keyboardHeight + 24, 24) },
           ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={true}>
@@ -384,13 +437,13 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
               onPress={() => setShowRecipientPicker((prev) => !prev)}
               style={styles.recipientHeaderRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>Do kogo (Odbiorca):</Text>
+                <Text style={styles.fieldLabel}>Odbiorca</Text>
                 <Text
                   style={[
                     styles.recipientValue,
                     selectedRecipientIds.length === 0 && { color: '#94a3b8' },
                   ]}
-                  numberOfLines={2}>
+                  numberOfLines={1}>
                   {educatorFallbackLabel}
                 </Text>
               </View>
@@ -399,7 +452,7 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
               ) : (
                 <View style={styles.changeRecipientBtn}>
                   <Text style={styles.changeRecipientText}>
-                    {showRecipientPicker ? 'Ukryj listę' : 'Zmień'}
+                    {showRecipientPicker ? 'Ukryj' : 'Zmień'}
                   </Text>
                   <Ionicons
                     name={showRecipientPicker ? 'chevron-up' : 'chevron-down'}
@@ -472,14 +525,9 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
           {mode === 'excuse' && (
             <View style={styles.card}>
               <View style={styles.excuseDaysHeader}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>
-                    Dni nieobecności nieusprawiedliwionych (NB):
-                  </Text>
-                  <Text style={styles.excuseSubHint}>
-                    Zaznacz dni, które chcesz dołączyć do wiadomości
-                  </Text>
-                </View>
+                <Text style={styles.fieldLabel} numberOfLines={1}>
+                  Dni nieobecności (NB)
+                </Text>
                 {absenceDaysList.length > 0 && (
                   <TouchableOpacity
                     onPress={() => {
@@ -489,7 +537,9 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
                           ? []
                           : allDates;
                       setSelectedAbsenceDates(next);
-                      setBody(buildExcuseBody(next, excuseSettings));
+                      setBody(
+                        buildExcuseBody(next, activePreset, excuseStore.customSignature)
+                      );
                     }}>
                     <Text style={styles.selectAllText}>
                       {selectedAbsenceDates.length === absenceDaysList.length
@@ -504,7 +554,7 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
                 <View style={styles.noAbsencesBox}>
                   <Ionicons name="checkmark-circle" size={20} color="#10b981" />
                   <Text style={styles.noAbsencesText}>
-                    Brak nieusprawiedliwionych nieobecności (NB)! Możesz mimo to edytować i wysłać wiadomość poniżej.
+                    Brak nieusprawiedliwionych nieobecności (NB). Możesz mimo to edytować i wysłać wiadomość poniżej.
                   </Text>
                 </View>
               ) : (
@@ -540,12 +590,50 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
                   })}
                 </View>
               )}
+
+              {/* Saved Excuse Presets Chips */}
+              <View style={styles.reasonPresetsBlock}>
+                <View style={styles.reasonPresetsHeader}>
+                  <Text style={styles.fieldLabel}>Szablon usprawiedliwienia</Text>
+                  <TouchableOpacity onPress={handleOpenTemplateSettings}>
+                    <Text style={styles.editTemplateLink}>
+                      Edytuj szablony →
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.reasonChipsRow}>
+                  {excuseStore.presets.map((preset) => {
+                    const active = activePreset.id === preset.id;
+                    return (
+                      <TouchableOpacity
+                        key={preset.id}
+                        activeOpacity={0.8}
+                        onPress={() => handleSelectExcusePreset(preset)}
+                        style={[
+                          styles.reasonChip,
+                          active && styles.reasonChipActive,
+                        ]}>
+                        <Text
+                          style={[
+                            styles.reasonChipText,
+                            active && styles.reasonChipTextActive,
+                          ]}>
+                          {preset.name || 'Szablon'}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
             </View>
           )}
 
-          {/* Subject Input */}
+          {/* Subject & Message Body Card */}
           <View style={styles.card}>
-            <Text style={styles.fieldLabel}>Temat:</Text>
+            <Text style={styles.fieldLabel}>Temat</Text>
             <TextInput
               value={subject}
               onChangeText={setSubject}
@@ -554,11 +642,10 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
               placeholderTextColor="#64748b"
               style={styles.subjectInput}
             />
-          </View>
 
-          {/* Message Body Input */}
-          <View style={styles.card}>
-            <Text style={styles.fieldLabel}>Treść wiadomości:</Text>
+            <Text style={[styles.fieldLabel, { marginTop: 4 }]}>
+              Treść wiadomości
+            </Text>
             <TextInput
               value={body}
               onChangeText={setBody}
@@ -572,6 +659,28 @@ export const MessageComposeModal: React.FC<MessageComposeModalProps> = ({
             />
           </View>
         </ScrollView>
+
+        {/* Bottom Primary Send Bar */}
+        <View style={styles.footerBar}>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            disabled={sending}
+            onPress={handleSend}
+            style={[styles.sendBottomBtn, sending && { opacity: 0.6 }]}>
+            {sending ? (
+              <ActivityIndicator size="small" color="#ffffff" />
+            ) : (
+              <>
+                <Ionicons name="send" size={17} color="#ffffff" />
+                <Text style={styles.sendBottomBtnText}>
+                  {mode === 'excuse'
+                    ? 'Wyślij usprawiedliwienie'
+                    : 'Wyślij wiadomość'}
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -600,22 +709,91 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   topTitle: {
-    fontSize: 16,
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 17,
     fontWeight: '800',
     color: '#f8fafc',
+    marginHorizontal: 8,
   },
-  sendTopBtn: {
+  settingsTopBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#3b82f6',
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 12,
+    gap: 5,
+    backgroundColor: 'rgba(56, 189, 248, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.4)',
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: 11,
   },
-  sendTopBtnText: {
+  settingsTopBtnText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  footerBar: {
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+    backgroundColor: '#0f172a',
+  },
+  sendBottomBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#3b82f6',
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+  sendBottomBtnText: {
     color: '#ffffff',
-    fontSize: 13,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  reasonPresetsBlock: {
+    marginTop: 6,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    gap: 8,
+  },
+  reasonPresetsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  editTemplateLink: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  reasonChipsRow: {
+    gap: 8,
+    paddingVertical: 2,
+  },
+  reasonChip: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  reasonChipActive: {
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
+    borderColor: '#38bdf8',
+  },
+  reasonChipText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reasonChipTextActive: {
+    color: '#f8fafc',
     fontWeight: '700',
   },
   scrollContent: {

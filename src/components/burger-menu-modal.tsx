@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { usePathname, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLibrus } from '@/context/LibrusContext';
+import { RIGHT_RAIL_WIDTH, WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 
 interface BurgerMenuModalProps {
   visible: boolean;
@@ -26,12 +27,14 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
-  const { unreadMessagesCount, hasLowSubjectAttendance, student } = useLibrus();
+  const { unreadMessagesCount, subjectAttendanceAlert } = useLibrus();
 
-  // Dynamic width bounded by min (324px) and max (460px), adapting to folded & unfolded screens
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+
+  // Dynamic width bounded by min (324px) and max (420px), adapting to folded & unfolded screens
   const dynamicSheetWidth = Math.min(
-    Math.max(Math.round(windowWidth * 0.86), 324),
-    Math.min(460, windowWidth - 24)
+    Math.max(Math.round(windowWidth * (isWideScreen ? 0.52 : 0.86)), 324),
+    Math.min(420, windowWidth - (isWideScreen ? RIGHT_RAIL_WIDTH + 32 : 24))
   );
 
   const navigateTo = (route: string) => {
@@ -64,8 +67,13 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
       icon: 'pie-chart-outline' as const,
       activeIcon: 'pie-chart' as const,
       color: '#10b981',
-      badge: hasLowSubjectAttendance ? 'Uwaga <60%' : null,
-      badgeColor: '#ef4444',
+      badge:
+        subjectAttendanceAlert === 'danger'
+          ? 'Zagrożenie <50%'
+          : subjectAttendanceAlert === 'warning'
+            ? 'Uwaga 50–60%'
+            : null,
+      badgeColor: subjectAttendanceAlert === 'danger' ? '#ef4444' : '#f59e0b',
     },
     {
       key: 'settings',
@@ -80,7 +88,9 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
     },
   ];
 
-  const bottomOffset = Math.max(insets.bottom, 8) + 64;
+  const bottomOffset = isWideScreen
+    ? Math.max(insets.bottom, 12) + 115
+    : Math.max(insets.bottom, 8) + 64;
 
   return (
     <Modal
@@ -88,7 +98,12 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
       transparent
       animationType="fade"
       onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
+      <Pressable
+        style={[
+          styles.backdrop,
+          isWideScreen && { paddingRight: RIGHT_RAIL_WIDTH + 12 },
+        ]}
+        onPress={onClose}>
         <Pressable
           style={[
             styles.sheet,
@@ -100,12 +115,7 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
           onPress={(e) => e.stopPropagation()}>
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderLeft}>
-              <Text style={styles.sheetTitle}>Menu Ligmus</Text>
-              {student?.name ? (
-                <Text style={styles.sheetSubtitle} numberOfLines={1}>
-                  {student.name} {student.classGroup ? `• ${student.classGroup}` : ''}
-                </Text>
-              ) : null}
+              <Text style={styles.sheetTitle}>Menu</Text>
             </View>
             <TouchableOpacity
               onPress={onClose}
@@ -225,11 +235,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#f8fafc',
     letterSpacing: 0.2,
-  },
-  sheetSubtitle: {
-    fontSize: 12,
-    color: '#94a3b8',
-    marginTop: 2,
   },
   closeBtn: {
     width: 30,

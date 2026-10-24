@@ -16,6 +16,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { TimetableLesson } from '@/types/librus';
+import { decodeHtmlEntities } from '@/utils/html';
 import { getSubjectColor } from '@/utils/subjectColors';
 import {
   AttendanceIcon,
@@ -77,7 +78,20 @@ export const LessonDetailsModal: React.FC<LessonDetailsModalProps> = ({
         });
       }, 50);
     }
-  }, [visible, initialIndex, lessons.length, SCREEN_WIDTH, translateY]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, initialIndex, lessons.length, translateY]);
+
+  useEffect(() => {
+    if (visible && lessons.length > 0) {
+      const idx = Math.min(Math.max(currentIndexRef.current, 0), lessons.length - 1);
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({
+          offset: idx * SCREEN_WIDTH,
+          animated: false,
+        });
+      }, 40);
+    }
+  }, [SCREEN_WIDTH, visible, lessons.length]);
 
   const handleDragStart = (e: GestureResponderEvent) => {
     dragStartYRef.current = e.nativeEvent.pageY;
@@ -453,7 +467,7 @@ export const LessonDetailsModal: React.FC<LessonDetailsModalProps> = ({
                             <Text style={[styles.topicLabel, { color: accent }]}>
                               Temat lekcji
                             </Text>
-                            <Text style={styles.topicText}>{item.topic}</Text>
+                            <Text style={styles.topicText}>{decodeHtmlEntities(item.topic)}</Text>
                           </View>
                         </View>
                       ) : null}

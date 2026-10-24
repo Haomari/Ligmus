@@ -185,15 +185,16 @@ export default function MessagesScreen() {
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerTopRow}>
-          <Text style={styles.headerTitle}>Wiadomości</Text>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            Wiadomości
+          </Text>
 
           <View style={styles.headerActions}>
             <TouchableOpacity
               activeOpacity={0.85}
               onPress={openExcuseGenerator}
               style={styles.excuseBtn}>
-              <Ionicons name="sparkles" size={15} color="#34d399" />
-              <Text style={styles.excuseBtnText}>Usprawiedliwienie</Text>
+              <Ionicons name="sparkles" size={18} color="#34d399" />
               {pendingExcuseDaysCount > 0 && (
                 <View style={styles.excuseCountBadge}>
                   <Text style={styles.excuseCountText}>
@@ -207,7 +208,7 @@ export default function MessagesScreen() {
               activeOpacity={0.85}
               onPress={openStandardCompose}
               style={styles.newMsgBtn}>
-              <Ionicons name="create-outline" size={18} color="#ffffff" />
+              <Ionicons name="create-outline" size={22} color="#ffffff" />
             </TouchableOpacity>
           </View>
         </View>
@@ -468,6 +469,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   headerTitle: {
+    flex: 1,
     fontSize: 24,
     fontWeight: '800',
     color: '#f8fafc',
@@ -475,42 +477,39 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
   excuseBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
+    height: 42,
+    minWidth: 42,
+    paddingHorizontal: 11,
     backgroundColor: 'rgba(16, 185, 129, 0.15)',
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.45)',
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-    borderRadius: 12,
-  },
-  excuseBtnText: {
-    color: '#34d399',
-    fontSize: 12,
-    fontWeight: '700',
+    borderRadius: 13,
   },
   excuseCountBadge: {
     backgroundColor: '#10b981',
     borderRadius: 999,
-    minWidth: 18,
-    height: 18,
+    minWidth: 19,
+    height: 19,
     paddingHorizontal: 5,
     alignItems: 'center',
     justifyContent: 'center',
   },
   excuseCountText: {
     color: '#064e3b',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '800',
   },
   newMsgBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
+    width: 44,
+    height: 42,
+    borderRadius: 13,
     backgroundColor: '#3b82f6',
     alignItems: 'center',
     justifyContent: 'center',

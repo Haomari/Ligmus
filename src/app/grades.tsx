@@ -5,16 +5,20 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLibrus } from '@/context/LibrusContext';
 import { Grade, SubjectGrades } from '@/types/librus';
 import { GradeDetailsModal, getGradeColor } from '@/components/grade-details-modal';
+import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 
 export default function GradesScreen() {
   const { grades, isLoading, refreshData } = useLibrus();
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
 
   const [selectedSemester, setSelectedSemester] = useState<1 | 2>(1);
   const [hasInitializedSemester, setHasInitializedSemester] = useState(false);
@@ -148,6 +152,7 @@ export default function GradesScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.listContainer,
+          isWideScreen && styles.listContainerWide,
           { paddingBottom: Math.max(insets.bottom + 24, 40) },
         ]}
         showsVerticalScrollIndicator={false}
@@ -170,7 +175,10 @@ export default function GradesScreen() {
           return (
             <TouchableOpacity
               key={subject.id}
-              style={styles.subjectCard}
+              style={[
+                styles.subjectCard,
+                isWideScreen && styles.subjectCardWide,
+              ]}
               activeOpacity={hasGrades ? 0.75 : 1}
               disabled={!hasGrades}
               onPress={() => {
@@ -321,12 +329,20 @@ const styles = StyleSheet.create({
     padding: 18,
     gap: 12,
   },
+  listContainerWide: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
   subjectCard: {
     backgroundColor: '#1e293b',
     borderRadius: 16,
     padding: 16,
     borderWidth: 1,
     borderColor: '#334155',
+  },
+  subjectCardWide: {
+    width: '48.8%',
   },
   subjectHeader: {
     flexDirection: 'row',

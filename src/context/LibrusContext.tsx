@@ -20,6 +20,7 @@ import {
   getCachedMessages,
   getCachedRealizations,
   isValidAttendanceStats,
+  recordSeenInboxMessages,
   saveCachedAttendanceStats,
   saveCachedMessages,
   saveCachedWeek,
@@ -28,9 +29,10 @@ import {
 import {
   computeDetailedAttendance,
   computeStats,
+  getFirstSchoolYearLessonDate,
   mergeAttendanceAndTopics,
 } from '@/services/timetableMapper';
-import { getInitialSchoolDate, getMonday, toISODate } from '@/utils/dates';
+import { addDays, getInitialSchoolDate, getMonday, toISODate } from '@/utils/dates';
 
 interface LibrusContextType {
   student: StudentInfo | null;
@@ -44,6 +46,7 @@ interface LibrusContextType {
   sentMessages: LibrusMessageSummary[];
   unreadMessagesCount: number;
   hasLowSubjectAttendance: boolean;
+  subjectAttendanceAlert: 'danger' | 'warning' | null;
   loadWeek: (weekStartIso: string, forceNetwork?: boolean) => Promise<WeekSchedule | null>;
   loadMessages: (folder: MessageFolder) => Promise<LibrusMessageSummary[]>;
   markMessageAsReadLocal: (messageId: string) => void;
@@ -82,23 +85,45 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     [inboxMessages]
   );
 
-  const hasLowSubjectAttendance = useMemo(() => {
-    if (attendanceMarks.length === 0 && Object.keys(weeks).length === 0) return false;
-    const detailed = computeDetailedAttendance(
+  const detailedYearAttendance = useMemo(() => {
+    if (attendanceMarks.length === 0 && Object.keys(weeks).length === 0) {
+      return null;
+    }
+    return computeDetailedAttendance(
       attendanceMarks,
       realizations,
       weeks,
-      'year'
+      'year',
+      null,
+      attendanceStats
     );
-    return detailed.lowAttendanceSubjects.length > 0;
-  }, [attendanceMarks, realizations, weeks]);
+  }, [attendanceMarks, realizations, weeks, attendanceStats]);
+
+  const effectiveAttendanceStats = useMemo<AttendanceStats | null>(() => {
+    if (detailedYearAttendance && detailedYearAttendance.overall.total > 0) {
+      return detailedYearAttendance.overall;
+    }
+    return attendanceStats;
+  }, [detailedYearAttendance, attendanceStats]);
+
+  useEffect(() => {
+    if (effectiveAttendanceStats && isValidAttendanceStats(effectiveAttendanceStats)) {
+      saveCachedAttendanceStats(effectiveAttendanceStats);
+    }
+  }, [effectiveAttendanceStats]);
+
+  const subjectAttendanceAlert = useMemo<'danger' | 'warning' | null>(() => {
+    const low = detailedYearAttendance?.lowAttendanceSubjects ?? [];
+    if (low.some((s) => s.status === 'danger')) return 'danger';
+    if (low.some((s) => s.status === 'warning')) return 'warning';
+    return null;
+  }, [detailedYearAttendance]);
+
+  const hasLowSubjectAttendance = subjectAttendanceAlert !== null;
 
   const loadWeek = useCallback(
     async (weekStartIso: string, forceNetwork: boolean = false): Promise<WeekSchedule | null> => {
-      console.log(`[LibrusContext loadWeek] Requesting week: ${weekStartIso}, forceNetwork: ${forceNetwork}`);
       const cached = librusClient.getCachedWeekSchedule(weekStartIso);
-      const cachedLessons = cached?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0;
-      console.log(`[LibrusContext loadWeek] Cached week exists: ${Boolean(cached)}, total lessons: ${cachedLessons}`);
       if (cached && weekHasLessons(cached)) {
         const mergedCached = mergeAttendanceAndTopics(
           cached,
@@ -121,10 +146,7 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         }
       }
 
-      console.log(`[LibrusContext loadWeek] Calling librusClient.getWeek(${weekStartIso})...`);
       const fresh = await librusClient.getWeek(weekStartIso);
-      const freshLessons = fresh?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0;
-      console.log(`[LibrusContext loadWeek] librusClient.getWeek result: ${Boolean(fresh)}, total lessons: ${freshLessons}`);
       if (fresh && weekHasLessons(fresh)) {
         const mergedFresh = mergeAttendanceAndTopics(
           fresh,
@@ -135,25 +157,15 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setWeeks((prev) => ({ ...prev, [weekStartIso]: mergedFresh }));
 
         setAttendanceStats((prevStats) => {
-          if (prevStats && isValidAttendanceStats(prevStats) && prevStats.present > 0) {
-            return prevStats;
-          }
           const allWk = { ...getAllCachedWeeks(), [weekStartIso]: mergedFresh };
-          const recomputed = computeStats(
+          const recomputed = computeDetailedAttendance(
             marksRef.current,
             realizationsRef.current,
+            allWk,
+            'year',
             null,
             prevStats
-              ? {
-                  present: 0,
-                  absent: prevStats.absent,
-                  excused: prevStats.excused,
-                  late: prevStats.late,
-                  exempt: prevStats.exempt,
-                }
-              : null,
-            allWk
-          );
+          ).overall;
           if (isValidAttendanceStats(recomputed)) {
             saveCachedAttendanceStats(recomputed);
             return recomputed;
@@ -178,8 +190,12 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const fresh = await librusClient.getMessages(folder);
     if (fresh) {
-      if (folder === 'inbox') setInboxMessages(fresh);
-      else setSentMessages(fresh);
+      if (folder === 'inbox') {
+        setInboxMessages(fresh);
+        recordSeenInboxMessages(fresh);
+      } else {
+        setSentMessages(fresh);
+      }
       return fresh;
     }
     return cached ?? [];
@@ -275,7 +291,6 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       // 2. Fetch fresh live data from Synergia in parallel
-      console.log(`[LibrusContext loadAllData] Fetching fresh data in parallel for initialWeek: ${initialWeekStart}, currentWeek: ${currentWeekStart}`);
       const [stu, grd, attData, freshWeek, currentCalendarWeek, freshInbox, freshSent] =
         await Promise.all([
           librusClient.getStudentInfo(),
@@ -289,11 +304,12 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           librusClient.getMessages('sent'),
         ]);
 
-      console.log(`[LibrusContext loadAllData] Results: student=${stu?.name ?? 'null'}, grades=${grd?.length ?? 0}, freshWeek=${freshWeek?.weekStart ?? 'null'} (lessons: ${freshWeek?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0}), currentCalendarWeek=${currentCalendarWeek?.weekStart ?? 'null'}`);
-
       if (stu) setStudent(stu);
       if (grd && grd.length > 0) setGrades(grd);
-      if (freshInbox) setInboxMessages(freshInbox);
+      if (freshInbox) {
+        setInboxMessages(freshInbox);
+        recordSeenInboxMessages(freshInbox);
+      }
       if (freshSent) setSentMessages(freshSent);
 
       if (attData) {
@@ -366,6 +382,28 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           setAttendanceStats(finalStats);
         }
       }
+
+      // 3. Background-synchronize all past school-year timetable weeks from September 1st
+      // so per-subject attendance counts have every historical week cached on disk
+      const schoolYearMondays: string[] = [];
+      let mondayCursor = getMonday(getFirstSchoolYearLessonDate(new Date()));
+      while (toISODate(mondayCursor) <= currentWeekStart) {
+        schoolYearMondays.push(toISODate(mondayCursor));
+        mondayCursor = addDays(mondayCursor, 7);
+      }
+
+      void librusClient.syncWeeksBatch(schoolYearMondays, (syncedWeek) => {
+        const mergedHistorical = mergeAttendanceAndTopics(
+          syncedWeek,
+          marksRef.current,
+          realizationsRef.current
+        );
+        saveCachedWeek(mergedHistorical);
+        setWeeks((prev) => ({
+          ...prev,
+          [mergedHistorical.weekStart]: mergedHistorical,
+        }));
+      });
     } catch (err) {
       console.error('Failed to load Librus data', err);
     } finally {
@@ -393,12 +431,13 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   useEffect(() => {
-    loadAllData(true);
+    Promise.resolve().then(() => {
+      loadAllData(true);
+    });
 
     // Auto-resync when returning from background
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-        console.log('[LibrusContext] App returned to foreground, auto-resyncing...');
         loadAllData(false);
       }
       appState.current = nextAppState;
@@ -445,13 +484,14 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         grades,
         timetable,
         weeks,
-        attendanceStats,
+        attendanceStats: effectiveAttendanceStats,
         attendanceMarks,
         realizations,
         inboxMessages,
         sentMessages,
         unreadMessagesCount,
         hasLowSubjectAttendance,
+        subjectAttendanceAlert,
         loadWeek,
         loadMessages,
         markMessageAsReadLocal,

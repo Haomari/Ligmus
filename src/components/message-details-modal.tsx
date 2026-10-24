@@ -18,6 +18,12 @@ import {
   LibrusMessageSummary,
 } from '@/types/librus';
 import { cleanLibrusPersonName, librusClient } from '@/services/librusClient';
+import {
+  formatDownloadFolderLabel,
+  getDownloadFolderUri,
+  saveDownloadFolderUri,
+} from '@/services/fileCache';
+import { ToastBanner } from '@/components/toast-banner';
 
 interface MessageDetailsModalProps {
   message: LibrusMessageSummary | null;
@@ -40,6 +46,7 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
   const [detail, setDetail] = useState<LibrusMessageDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible || !message) {
@@ -109,13 +116,31 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
           .replace(/[\\/:*?"<>|]/g, '_')
           .trim() || 'zalacznik';
 
-      const targetDir = await Directory.pickDirectoryAsync();
-      const savedFile = targetDir.createFile(safeFileName, result.mimeType);
-      savedFile.write(result.bytes);
+      let savedUri = getDownloadFolderUri();
+      let wroteSuccessfully = false;
 
-      Alert.alert(
-        'Pobrano załącznik',
-        `Plik „${safeFileName}” został zapisany w wybranym folderze na telefonie.`
+      if (savedUri) {
+        try {
+          const existingDir = new Directory(savedUri);
+          const savedFile = existingDir.createFile(safeFileName, result.mimeType);
+          savedFile.write(result.bytes);
+          wroteSuccessfully = true;
+        } catch {
+          // Saved folder permission may have expired; fall back to directory picker
+          savedUri = null;
+        }
+      }
+
+      if (!wroteSuccessfully) {
+        const targetDir = await Directory.pickDirectoryAsync();
+        savedUri = targetDir.uri;
+        saveDownloadFolderUri(savedUri);
+        const savedFile = targetDir.createFile(safeFileName, result.mimeType);
+        savedFile.write(result.bytes);
+      }
+
+      setToastMessage(
+        `Zapisano „${safeFileName}” (${formatDownloadFolderLabel(savedUri)})`
       );
     } catch (err: any) {
       const msg = String(err?.message || '');
@@ -341,6 +366,8 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
             </TouchableOpacity>
           </View>
         )}
+
+        <ToastBanner message={toastMessage} onHide={() => setToastMessage(null)} />
       </View>
     </Modal>
   );

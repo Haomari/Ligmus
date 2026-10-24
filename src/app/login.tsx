@@ -72,7 +72,7 @@ export default function LoginScreen() {
               <Ionicons name="person-outline" size={20} color="#94a3b8" style={styles.inputIcon} />
               <TextInput
                 style={styles.input}
-                placeholder="Login (np. 67monster)"
+                placeholder="Login (xxxxxxxu)"
                 placeholderTextColor="#64748b"
                 value={username}
                 onChangeText={setUsername}
@@ -114,13 +114,6 @@ export default function LoginScreen() {
               )}
             </TouchableOpacity>
           </View>
-
-          <View style={styles.securityNote}>
-            <Ionicons name="lock-closed" size={14} color="#64748b" />
-            <Text style={styles.securityNoteText}>
-              Twoje hasło jest szyfrowane i nigdy nie trafia na żaden zewnętrzny serwer.
-            </Text>
-          </View>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -137,19 +130,10 @@ const styles = StyleSheet.create({
     padding: 20,
     justifyContent: 'center',
   },
-  backButton: {
-    position: 'absolute',
-    top: 20,
-    left: 20,
-    zIndex: 10,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#1e293b',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   content: {
+    width: '100%',
+    maxWidth: 460,
+    alignSelf: 'center',
     gap: 20,
   },
   header: {
@@ -232,49 +216,5 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
-  },
-  orDivider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginVertical: 4,
-  },
-  orLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: '#334155',
-  },
-  orText: {
-    fontSize: 12,
-    color: '#64748b',
-    fontWeight: '600',
-  },
-  demoButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#1e293b',
-    borderWidth: 1,
-    borderColor: '#38bdf850',
-    height: 50,
-    borderRadius: 14,
-  },
-  demoButtonText: {
-    color: '#38bdf8',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  securityNote: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    marginTop: 10,
-  },
-  securityNoteText: {
-    fontSize: 11,
-    color: '#64748b',
-    textAlign: 'center',
   },
 });

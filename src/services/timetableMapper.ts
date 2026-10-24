@@ -8,34 +8,39 @@ import {
   WeekSchedule,
 } from '@/types/librus';
 import { addDays, parseHM, parseISODate, toISODate } from '@/utils/dates';
+import { decodeHtmlEntities } from '@/utils/html';
 import { getAllCachedWeeks } from './fileCache';
 
 export function classifyAttendanceSymbol(
   rawSymbol: string,
   rawName?: string
 ): { kind: AttendanceKind; defaultName: string } {
-  const sym = rawSymbol.trim().toLowerCase();
+  const sym = rawSymbol.trim().toLowerCase().replace(/[.]+$/, '');
   if (sym === 'ob' || sym === 'obecność' || sym === 'obecnosc') {
     return { kind: 'present', defaultName: rawName || 'Obecność' };
   }
-  if (sym === 'nb') {
+  if (sym === 'nb' || sym === 'nn') {
     return { kind: 'absent', defaultName: rawName || 'Nieobecność nieusprawiedliwiona' };
   }
-  if (sym === 'u' || sym === 'nu') {
+  if (sym === 'u' || sym === 'nu' || sym === 'us' || sym === 'usp' || sym === 'un') {
     return { kind: 'excused', defaultName: rawName || 'Nieobecność usprawiedliwiona' };
   }
   if (sym === 'sp' || sym === 'spóźnienie' || sym === 'spoznienie') {
     return { kind: 'late', defaultName: rawName || 'Spóźnienie' };
   }
-  if (sym === 'zw' || sym === 'wy' || sym === 'w' || sym === 'k') {
+  if (sym === 'zw' || sym === 'wy' || sym === 'w' || sym === 'k' || sym === 'ns') {
     return { kind: 'exempt', defaultName: rawName || 'Zwolnienie / Wycieczka' };
   }
   if (rawName) {
     const lowerName = rawName.toLowerCase();
-    if (lowerName.includes('usprawiedliwion') && !lowerName.includes('nieusprawiedliwion')) {
+    if (
+      (lowerName.includes('usprawiedliwion') || lowerName.includes('uspr')) &&
+      !lowerName.includes('nieuspraw') &&
+      !lowerName.includes('nieuspr')
+    ) {
       return { kind: 'excused', defaultName: rawName };
     }
-    if (lowerName.includes('nieobecno')) {
+    if (lowerName.includes('nieobecno') || lowerName.includes('nieuspr')) {
       return { kind: 'absent', defaultName: rawName };
     }
     if (lowerName.includes('spóźnien') || lowerName.includes('spoznien')) {
@@ -205,9 +210,10 @@ export function mergeAttendanceAndTopics(
             }
           }
 
+          const rawTopic = real?.topic || lesson.topic;
           return {
             ...lesson,
-            topic: real?.topic || lesson.topic,
+            topic: rawTopic ? decodeHtmlEntities(rawTopic) : undefined,
             attendance: mark,
           };
         }),
@@ -228,7 +234,7 @@ export interface ScrapedAttendanceSummary {
  * Returns the date of the first regular timetable day of the Polish school year
  * (the day after the September 1st opening ceremony, or first Monday if Sept 1 is Fri–Sun).
  */
-function getFirstSchoolYearLessonDate(now: Date): Date {
+export function getFirstSchoolYearLessonDate(now: Date): Date {
   const year = now.getMonth() >= 8 ? now.getFullYear() : now.getFullYear() - 1;
   const sep1 = new Date(year, 8, 1, 12, 0, 0, 0);
   const dow = sep1.getDay(); // 0 = Sun, 1 = Mon, ..., 5 = Fri, 6 = Sat
@@ -429,7 +435,8 @@ export function computeDetailedAttendance(
   realizations: LessonRealization[] = [],
   cachedWeeks: Record<string, WeekSchedule> = {},
   semesterFilter: SemesterFilter = 'all',
-  subjectFilter: string | null = null
+  subjectFilter: string | null = null,
+  fallbackSummaryStats?: AttendanceStats | null
 ): DetailedAttendanceResult {
   const normalizedSem: 1 | 2 | 'all' =
     semesterFilter === 'sem1' || semesterFilter === 1
@@ -495,11 +502,21 @@ export function computeDetailedAttendance(
     return canonicalSubjectByKey.get(key)!;
   };
 
-  // Weekday template: for each weekday 0..4, choose the day with the most lessons across cachedWeeks
+  // Weekday template: for each weekday 0..4 and hourNumber slot, pick the regular scheduled subject
+  // across all cachedWeeks + disk cache (preferring past/current weeks and non-substituted base lessons)
   const weekdayTemplateSubjects: string[][] = [[], [], [], [], []];
+  const slotSubjectScores: Map<number, Map<string, number>>[] = [
+    new Map(),
+    new Map(),
+    new Map(),
+    new Map(),
+    new Map(),
+  ];
   const exactDateSubjects = new Map<string, string[]>();
-  const effectiveWeeks =
-    Object.keys(cachedWeeks).length > 0 ? cachedWeeks : getAllCachedWeeks();
+  const effectiveWeeks: Record<string, WeekSchedule> = {
+    ...getAllCachedWeeks(),
+    ...cachedWeeks,
+  };
 
   for (const wk of Object.values(effectiveWeeks)) {
     if (!wk?.days) continue;
@@ -510,8 +527,19 @@ export function computeDetailedAttendance(
         .filter(Boolean);
 
       if (idx >= 0 && idx < 5) {
-        if (nonCancelledSubjects.length > weekdayTemplateSubjects[idx].length) {
-          weekdayTemplateSubjects[idx] = nonCancelledSubjects;
+        const isPastOrToday = Boolean(d.date && d.date <= todayIso);
+        const dayMap = slotSubjectScores[idx];
+        for (const l of d.lessons) {
+          const baseSubj = registerSubject(l.original?.subject || l.subject);
+          if (!baseSubj) continue;
+          const hr = l.hourNumber ?? 0;
+          if (!dayMap.has(hr)) {
+            dayMap.set(hr, new Map());
+          }
+          const subjMap = dayMap.get(hr)!;
+          const weight =
+            (isPastOrToday ? 3 : 1) + (!l.isCancelled && !l.isSubstitution ? 2 : 0);
+          subjMap.set(baseSubj, (subjMap.get(baseSubj) ?? 0) + weight);
         }
       }
 
@@ -526,6 +554,27 @@ export function computeDetailedAttendance(
         exactDateSubjects.set(d.date, completedToday);
       }
     });
+  }
+
+  for (let idx = 0; idx < 5; idx++) {
+    const dayMap = slotSubjectScores[idx];
+    const sortedHours = Array.from(dayMap.keys()).sort((a, b) => a - b);
+    const daySubjects: string[] = [];
+    for (const hr of sortedHours) {
+      const subjMap = dayMap.get(hr)!;
+      let bestSubj = '';
+      let bestScore = -1;
+      for (const [subj, score] of subjMap.entries()) {
+        if (score > bestScore) {
+          bestScore = score;
+          bestSubj = subj;
+        }
+      }
+      if (bestSubj) {
+        daySubjects.push(bestSubj);
+      }
+    }
+    weekdayTemplateSubjects[idx] = daySubjects;
   }
 
   // Register subjects from marks and realizations as well
@@ -621,18 +670,35 @@ export function computeDetailedAttendance(
         : undefined);
     const canon = registerSubject(rawSubj);
 
-    if (m.kind === 'absent') totalAbsent++;
-    else if (m.kind === 'excused') totalExcused++;
-    else if (m.kind === 'late') totalLate++;
-    else if (m.kind === 'exempt') totalExempt++;
+    const reclassified = classifyAttendanceSymbol(m.symbol || '', m.name).kind;
+    const effectiveKind = reclassified !== 'other' ? reclassified : m.kind;
+
+    if (effectiveKind === 'absent') totalAbsent++;
+    else if (effectiveKind === 'excused') totalExcused++;
+    else if (effectiveKind === 'late') totalLate++;
+    else if (effectiveKind === 'exempt') totalExempt++;
 
     if (canon) {
       const c = ensureCounter(canon);
-      if (m.kind === 'absent') c.absent++;
-      else if (m.kind === 'excused') c.excused++;
-      else if (m.kind === 'late') c.late++;
-      else if (m.kind === 'exempt') c.exempt++;
+      if (effectiveKind === 'absent') c.absent++;
+      else if (effectiveKind === 'excused') c.excused++;
+      else if (effectiveKind === 'late') c.late++;
+      else if (effectiveKind === 'exempt') c.exempt++;
     }
+  }
+
+  // Reconcile overall totals with Librus row-summary stats when viewing the full year
+  // or Semester 1 before Semester 2 has started (prevents missing/unparsed row marks from inflating present count)
+  const canUseSummaryFallback =
+    fallbackSummaryStats != null &&
+    (normalizedSem === 'all' ||
+      (normalizedSem === 1 && sem2Dates.length === 0 && todayIso < sem2StartIso));
+
+  if (canUseSummaryFallback && fallbackSummaryStats) {
+    totalAbsent = Math.max(totalAbsent, fallbackSummaryStats.absent || 0);
+    totalExcused = Math.max(totalExcused, fallbackSummaryStats.excused || 0);
+    totalLate = Math.max(totalLate, fallbackSummaryStats.late || 0);
+    totalExempt = Math.max(totalExempt, fallbackSummaryStats.exempt || 0);
   }
 
   // If no held lessons were found from timetable or realizations, estimate based on school calendar

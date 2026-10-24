@@ -16,14 +16,14 @@ import {
   WeekSchedule,
 } from '@/types/librus';
 import {
-  POLISH_DAY_NAMES,
-  POLISH_DAY_SHORT,
   addDays,
+  buildEmptyWeekDays,
   getInitialSchoolDate,
   getMonday,
   parseISODate,
   toISODate,
 } from '@/utils/dates';
+import { decodeHtmlEntities } from '@/utils/html';
 import {
   clearAllFileCaches,
   ensureSchoolYearCacheValid,
@@ -199,11 +199,20 @@ class LibrusClient {
         } catch {}
       }
 
-      // Restore cached grades
+      // Restore cached grades (sanitizing any legacy multi-line tooltip fields)
       const savedGrades = await this.getStoredData(STORAGE_KEYS.GRADES_CACHE);
       if (savedGrades) {
         try {
-          this.cachedGrades = JSON.parse(savedGrades);
+          const parsed: SubjectGrades[] = JSON.parse(savedGrades);
+          this.cachedGrades = parsed.map((s) => ({
+            ...s,
+            grades: (s.grades || []).map((g) => ({
+              ...g,
+              category: (g.category || 'Bieżąca').split(/\r?\n/)[0].trim() || 'Bieżąca',
+              teacher: g.teacher ? g.teacher.split(/\r?\n/)[0].trim() || undefined : undefined,
+              comment: g.comment ? g.comment.split(/\r?\n/)[0].trim() || undefined : undefined,
+            })),
+          }));
         } catch {}
       }
 
@@ -468,7 +477,7 @@ class LibrusClient {
         );
         const match = html.match(regex);
         if (!match) return null;
-        return match[1].replace(/<[^>]+>/g, '').replace(/&nbsp;?/g, ' ').trim();
+        return this.decodeHtml(match[1]);
       };
 
       const name =
@@ -547,7 +556,7 @@ class LibrusClient {
         const tdMatches = [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1]);
         if (tdMatches.length < 10) continue;
 
-        const subjectName = tdMatches[1].replace(/<[^>]+>/g, '').trim();
+        const subjectName = this.decodeHtml(tdMatches[1]);
         if (!subjectName || subjectName === 'K' || subjectName.toLowerCase() === 'zachowanie') continue;
 
         const grades: Grade[] = [];
@@ -555,7 +564,7 @@ class LibrusClient {
         const parseGradeBox = (spanHtml: string, semesterNum: 1 | 2): Grade | null => {
           const valMatch = spanHtml.match(/>\s*([^<>]+?)\s*<\/a>/i);
           if (!valMatch) return null;
-          const val = valMatch[1].trim().replace(/\*+$/, '');
+          const val = this.decodeHtml(valMatch[1]).replace(/\*+$/, '');
           if (!val) return null;
 
           const hrefMatch = spanHtml.match(/href="[^"]*\/(\d+)"/i);
@@ -563,11 +572,11 @@ class LibrusClient {
 
           const titleMatch = spanHtml.match(/title="([^"]*)"/i);
           const title = titleMatch
-            ? titleMatch[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+            ? decodeHtmlEntities(titleMatch[1], { stripTags: true, preserveNewlines: true })
             : '';
 
           const getField = (field: string) => {
-            const m = title.match(new RegExp(`${field}:\\s*([^<]+)`, 'i'));
+            const m = title.match(new RegExp(`(?:^|\\n)\\s*${field}:\\s*([^\\n\\r<]+)`, 'i'));
             return m ? m[1].trim() : '';
           };
 
@@ -699,20 +708,7 @@ class LibrusClient {
   }
 
   private decodeHtml(raw: string): string {
-    return raw
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&nbsp;?/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#0?39;|&apos;/gi, "'")
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&ndash;/gi, '–')
-      .replace(/&mdash;/gi, '—')
-      .replace(/\s+/g, ' ')
-      .trim();
+    return decodeHtmlEntities(raw, true);
   }
 
   private isSessionExpired(res: Response, html: string): boolean {
@@ -771,44 +767,22 @@ class LibrusClient {
    * Scrapes a week's timetable from https://synergia.librus.pl/przegladaj_plan_lekcji
    * and merges cached or live attendance + lesson realizations.
    */
-  async getWeek(weekStartIso?: string): Promise<WeekSchedule | null> {
-    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
-    if (!credsRaw) {
-      return null;
+  private parseTimetableFromHtml(
+    html: string,
+    fallbackMondayDate: Date
+  ): WeekSchedule | null {
+    // 1. Detect if HTML specifies the exact week range in <select name="tydzien">
+    let effectiveMondayDate = fallbackMondayDate;
+    const selectOptMatch =
+      html.match(/<option\b[^>]*value=["'](\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})["'][^>]*selected/i) ||
+      html.match(/<option\b[^>]*selected[^>]*value=["'](\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})["']/i);
+    if (selectOptMatch && selectOptMatch[1]) {
+      effectiveMondayDate = getMonday(parseISODate(selectOptMatch[1]));
     }
 
-    const now = new Date();
-    const requestedMondayDate = getMonday(
-      weekStartIso ? parseISODate(weekStartIso) : getInitialSchoolDate(now)
-    );
-    const requestedMondayIso = toISODate(requestedMondayDate);
-    const requestedSundayIso = toISODate(addDays(requestedMondayDate, 6));
+    const effectiveMondayIso = toISODate(effectiveMondayDate);
 
-    const parseTimetableFromHtml = (
-      html: string,
-      fallbackMondayDate: Date
-    ): WeekSchedule | null => {
-      // 1. Detect if HTML specifies the exact week range in <select name="tydzien">
-      let effectiveMondayDate = fallbackMondayDate;
-      const selectOptMatch =
-        html.match(/<option\b[^>]*value=["'](\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})["'][^>]*selected/i) ||
-        html.match(/<option\b[^>]*selected[^>]*value=["'](\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})["']/i);
-      if (selectOptMatch && selectOptMatch[1]) {
-        effectiveMondayDate = getMonday(parseISODate(selectOptMatch[1]));
-      }
-
-      const effectiveMondayIso = toISODate(effectiveMondayDate);
-
-      const days: DaySchedule[] = Array.from({ length: 5 }, (_, idx) => {
-        const d = addDays(effectiveMondayDate, idx);
-        return {
-          dayId: idx + 1,
-          dayName: POLISH_DAY_NAMES[idx],
-          shortName: POLISH_DAY_SHORT[idx],
-          date: toISODate(d),
-          lessons: [],
-        };
-      });
+      const days: DaySchedule[] = buildEmptyWeekDays(effectiveMondayIso);
 
       const parseTextBlock = (blockHtml: string) => {
         const subjMatch = blockHtml.match(/<b\b[^>]*>([\s\S]*?)<\/b>/i);
@@ -912,7 +886,6 @@ class LibrusClient {
         }
 
         if (rows.length === 0) {
-          console.log('[Timetable Parser] Tag-depth parser found 0 time rows. Trying standard <tr>...</tr> regex...');
           const simpleTrs = [...fullHtml.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
           for (const sm of simpleTrs) {
             const clean = sm[1].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ');
@@ -922,7 +895,6 @@ class LibrusClient {
           }
         }
 
-        console.log(`[Timetable Parser] extractTimetableRowsFromHtml found ${rows.length} rows (out of ${trStarts.length} total <tr> tags)`);
         return rows;
       };
 
@@ -998,19 +970,19 @@ class LibrusClient {
           const flagLower = flagText.toLowerCase();
 
           // Find struck ranges
-          const struckRanges: Array<[number, number]> = [];
+          const struckRanges: [number, number][] = [];
           for (const sMatch of cellHtml.matchAll(/<(?:s|strike)\b[^>]*>[\s\S]*?<\/(?:s|strike)>/gi)) {
             if (sMatch.index != null) {
               struckRanges.push([sMatch.index, sMatch.index + sMatch[0].length]);
             }
           }
 
-          const entries: Array<{
+          const entries: {
             subject: string;
             teacher: string;
             classroom: string;
             struck: boolean;
-          }> = [];
+          }[] = [];
 
           // 1. Check for <div class="text"> or <span class="text">
           for (const divMatch of cellHtml.matchAll(
@@ -1111,7 +1083,6 @@ class LibrusClient {
       }
 
       const totalLessons = days.reduce((sum, d) => sum + d.lessons.length, 0);
-      console.log(`[Timetable Parser] Parsed totalLessons=${totalLessons} across days:`, days.map(d => `${d.shortName}:${d.lessons.length}`).join(', '));
       if (totalLessons === 0) {
         return null;
       }
@@ -1131,22 +1102,36 @@ class LibrusClient {
       const merged = mergeAttendanceAndTopics(rawWeek, cachedMarks, cachedReal);
       saveCachedWeek(merged);
       return merged;
-    };
+  }
+
+  /**
+   * Scrapes a week's timetable from https://synergia.librus.pl/przegladaj_plan_lekcji
+   * and merges cached or live attendance + lesson realizations.
+   */
+  async getWeek(weekStartIso?: string): Promise<WeekSchedule | null> {
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) {
+      return null;
+    }
+
+    const now = new Date();
+    const requestedMondayDate = getMonday(
+      weekStartIso ? parseISODate(weekStartIso) : getInitialSchoolDate(now)
+    );
+    const requestedMondayIso = toISODate(requestedMondayDate);
+    const requestedSundayIso = toISODate(addDays(requestedMondayDate, 6));
 
     const fetchWeekFromLibrus = async (): Promise<WeekSchedule | null> => {
-      console.log(`[librusClient getWeek] Fetching default week via GET https://synergia.librus.pl/przegladaj_plan_lekcji (requested: ${requestedMondayIso})`);
       const getRes = await this.doFetch('https://synergia.librus.pl/przegladaj_plan_lekcji');
       const getHtml = await getRes.text();
       const isExpired = this.isSessionExpired(getRes, getHtml);
-      console.log(`[librusClient getWeek] GET status: ${getRes.status}, length: ${getHtml.length}, isExpired: ${isExpired}`);
 
       if (isExpired) {
         return null;
       }
 
       // Parse active week returned by GET
-      const activeWeekSchedule = parseTimetableFromHtml(getHtml, requestedMondayDate);
-      console.log(`[librusClient getWeek] activeWeekSchedule: ${activeWeekSchedule?.weekStart ?? 'null'}, totalLessons: ${activeWeekSchedule?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0}`);
+      const activeWeekSchedule = this.parseTimetableFromHtml(getHtml, requestedMondayDate);
 
       // If requested week matches what GET returned, or if no week was requested, return it directly
       if (activeWeekSchedule && activeWeekSchedule.weekStart === requestedMondayIso) {
@@ -1159,7 +1144,6 @@ class LibrusClient {
 
       // 2. Fetch specific requested week via POST
       try {
-        console.log(`[librusClient getWeek] POSTing for week ${requestedMondayIso}_${requestedSundayIso}, requestKey: ${requestKey ? 'present' : 'empty'}`);
         const bodyParts = [`tydzien=${encodeURIComponent(`${requestedMondayIso}_${requestedSundayIso}`)}`];
         if (requestKey) {
           bodyParts.push(`requestkey=${encodeURIComponent(requestKey)}`);
@@ -1174,10 +1158,8 @@ class LibrusClient {
         });
         const postHtml = await postRes.text();
         const postExpired = this.isSessionExpired(postRes, postHtml);
-        console.log(`[librusClient getWeek] POST status: ${postRes.status}, length: ${postHtml.length}, isExpired: ${postExpired}`);
         if (!postExpired) {
-          const postWeek = parseTimetableFromHtml(postHtml, requestedMondayDate);
-          console.log(`[librusClient getWeek] postWeek parsed: ${postWeek?.weekStart ?? 'null'}, totalLessons: ${postWeek?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0}`);
+          const postWeek = this.parseTimetableFromHtml(postHtml, requestedMondayDate);
           if (postWeek && postWeek.days.some((d) => d.lessons.length > 0)) {
             return postWeek;
           }
@@ -1236,14 +1218,126 @@ class LibrusClient {
   }
 
   /**
+   * Synchronizes multiple historical school weeks from the start of the school year
+   * using a single GET to /przegladaj_plan_lekcji followed by sequential POSTs for any
+   * week not yet present in fileCache.
+   */
+  async syncWeeksBatch(
+    mondayIsos: string[],
+    onWeekSynced?: (week: WeekSchedule) => void
+  ): Promise<Record<string, WeekSchedule>> {
+    const result: Record<string, WeekSchedule> = {};
+    const missingIsos: string[] = [];
+
+    for (const iso of mondayIsos) {
+      const cached = getCachedWeek(iso);
+      if (cached && cached.days.some((d) => d.lessons.length > 0)) {
+        result[iso] = cached;
+      } else {
+        missingIsos.push(iso);
+      }
+    }
+
+    if (missingIsos.length === 0) {
+      return result;
+    }
+
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) {
+      return result;
+    }
+
+    try {
+      const getRes = await this.doFetch('https://synergia.librus.pl/przegladaj_plan_lekcji');
+      const getHtml = await getRes.text();
+      if (this.isSessionExpired(getRes, getHtml)) {
+        return result;
+      }
+
+      let requestKey =
+        getHtml.match(/<input\b[^>]*name=["']requestkey["'][^>]*value=["']([^"']+)["']/i)?.[1] ?? '';
+
+      const availableMondays = new Set(
+        [
+          ...getHtml.matchAll(
+            /<option\b[^>]*value=["'](\d{4}-\d{2}-\d{2})_\d{4}-\d{2}-\d{2}["']/gi
+          ),
+        ].map((m) => m[1])
+      );
+
+      // Parse the default active week returned by GET in case it is one of missingIsos
+      const defaultWeek = this.parseTimetableFromHtml(getHtml, getMonday(new Date()));
+      if (
+        defaultWeek &&
+        defaultWeek.days.some((d) => d.lessons.length > 0) &&
+        missingIsos.includes(defaultWeek.weekStart)
+      ) {
+        result[defaultWeek.weekStart] = defaultWeek;
+        onWeekSynced?.(defaultWeek);
+      }
+
+      for (const mondayIso of missingIsos) {
+        if (result[mondayIso]) continue;
+        if (availableMondays.size > 0 && !availableMondays.has(mondayIso)) continue;
+        try {
+          const mondayDate = parseISODate(mondayIso);
+          const sundayIso = toISODate(addDays(mondayDate, 6));
+          const bodyParts = [`tydzien=${encodeURIComponent(`${mondayIso}_${sundayIso}`)}`];
+          if (requestKey) {
+            bodyParts.push(`requestkey=${encodeURIComponent(requestKey)}`);
+          }
+
+          const postRes = await this.doFetch('https://synergia.librus.pl/przegladaj_plan_lekcji', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              Referer: 'https://synergia.librus.pl/przegladaj_plan_lekcji',
+            },
+            body: bodyParts.join('&'),
+          });
+          const postHtml = await postRes.text();
+          if (this.isSessionExpired(postRes, postHtml)) break;
+
+          const nextRk =
+            postHtml.match(
+              /<input\b[^>]*name=["']requestkey["'][^>]*value=["']([^"']+)["']/i
+            )?.[1];
+          if (nextRk) {
+            requestKey = nextRk;
+          }
+
+          const parsedWeek = this.parseTimetableFromHtml(postHtml, mondayDate);
+          if (
+            parsedWeek &&
+            parsedWeek.weekStart === mondayIso &&
+            parsedWeek.days.some((d) => d.lessons.length > 0)
+          ) {
+            result[mondayIso] = parsedWeek;
+            onWeekSynced?.(parsedWeek);
+          }
+        } catch (weekErr) {
+          console.warn(`[librusClient syncWeeksBatch] Failed to sync week ${mondayIso}:`, weekErr);
+        }
+      }
+    } catch (err) {
+      console.warn('[librusClient syncWeeksBatch] Error during historical week sync:', err);
+    }
+
+    return result;
+  }
+
+  /**
    * Scrapes attendance marks from https://synergia.librus.pl/przegladaj_nb/uczen
    * and completed lesson topics + 'ob' present marks from https://synergia.librus.pl/zrealizowane_lekcje.
    */
-  async getAttendanceAndRealizations(): Promise<{
+  async getAttendanceAndRealizations(options?: {
+    includeRealizations?: boolean;
+  }): Promise<{
     marks: AttendanceMark[];
     realizations: LessonRealization[];
     stats: AttendanceStats;
   }> {
+    const includeRealizations = options?.includeRealizations !== false;
     const fallbackFromCache = () => {
       const marks = getCachedAttendanceMarks() ?? [];
       const realizations = getCachedRealizations() ?? [];
@@ -1265,12 +1359,20 @@ class LibrusClient {
     } | null> => {
       const [nbRes, realRes] = await Promise.all([
         this.doFetch('https://synergia.librus.pl/przegladaj_nb/uczen'),
-        this.doFetch('https://synergia.librus.pl/zrealizowane_lekcje'),
+        includeRealizations
+          ? this.doFetch('https://synergia.librus.pl/zrealizowane_lekcje')
+          : Promise.resolve(null),
       ]);
 
-      const [nbHtml, realHtml] = await Promise.all([nbRes.text(), realRes.text()]);
+      const [nbHtml, realHtml] = await Promise.all([
+        nbRes.text(),
+        realRes ? realRes.text() : Promise.resolve(''),
+      ]);
 
-      if (this.isSessionExpired(nbRes, nbHtml) || this.isSessionExpired(realRes, realHtml)) {
+      if (
+        this.isSessionExpired(nbRes, nbHtml) ||
+        (realRes && this.isSessionExpired(realRes, realHtml))
+      ) {
         return null;
       }
 
@@ -1349,6 +1451,8 @@ class LibrusClient {
 
         // Extract the 5 trailing summary columns per day row:
         // [0] Nieobecności uspr. (u), [1] Nieobecności nieuspr. (nb), [2] Nieobecności razem (u+nb), [3] Spóźnienia (sp), [4] Zwolnienia (zw)
+        let rowSummary: { excused: number; absent: number; late: number; exempt: number } | null =
+          null;
         if (tds.length >= 6 && !seenRowDates.has(rowDate)) {
           const last5 = tds.slice(-5).map((c) => {
             const txt = this.decodeHtml(c).trim();
@@ -1358,6 +1462,7 @@ class LibrusClient {
             seenRowDates.add(rowDate);
             const [c0, c1, c2, c3, c4] = last5;
             if (c0 + c1 === c2) {
+              rowSummary = { excused: c0, absent: c1, late: c3, exempt: c4 };
               summaryTotals.excused += c0;
               summaryTotals.absent += c1;
               summaryTotals.late += c3;
@@ -1374,13 +1479,23 @@ class LibrusClient {
         } else if (middleTds.length === 1) {
           const boxMatches = [
             ...middleTds[0].matchAll(
-              /<(?:p|span|div)\b[^>]*class="[^"]*\bbox\b[^"]*"[^>]*>[\s\S]*?<\/(?:p|span|div)>/gi
+              /<(p|span|div)\b[^>]*class="[^"]*\bbox\b[^"]*"[^>]*>[\s\S]*?<\/\1>/gi
             ),
           ].map((m) => m[0]);
-          slotChunks = boxMatches.length > 0 ? boxMatches : [middleTds[0]];
+          const totalAnchorsInCell = (middleTds[0].match(/<a\b/gi) || []).length;
+          const totalAnchorsInBoxes = boxMatches.reduce(
+            (sum, b) => sum + (b.match(/<a\b/gi) || []).length,
+            0
+          );
+          slotChunks =
+            boxMatches.length > 0 && totalAnchorsInBoxes >= totalAnchorsInCell
+              ? boxMatches
+              : [middleTds[0]];
         } else {
           slotChunks = [rowChunk];
         }
+
+        const rowMarksStartIdx = marks.length;
 
         for (let slotIdx = 0; slotIdx < slotChunks.length; slotIdx++) {
           const slotHtml = slotChunks[slotIdx];
@@ -1389,10 +1504,18 @@ class LibrusClient {
 
           for (let aIdx = 0; aIdx < anchorBlocks.length; aIdx++) {
             const aBlock = anchorBlocks[aIdx];
-            const valMatch = aBlock.match(/>\s*([^<>]+?)\s*<\/a>/i);
-            if (!valMatch) continue;
 
-            const symbol = this.decodeHtml(valMatch[1]).trim().replace(/\*+$/, '');
+            // Strip title="..." and onclick="..." before extracting inner text so nested tags
+            // or '>' inside attributes never break symbol extraction
+            const aWithoutAttrs = aBlock
+              .replace(/\btitle="[^"]*"/gi, '')
+              .replace(/\btitle='[^']*'/gi, '')
+              .replace(/\bonclick="[^"]*"/gi, '')
+              .replace(/\bonclick='[^']*'/gi, '');
+
+            const symbol = decodeHtmlEntities(aWithoutAttrs, true)
+              .trim()
+              .replace(/\*+$/, '');
             if (!symbol || symbol.length > 6) continue;
 
             const idMatch =
@@ -1402,15 +1525,10 @@ class LibrusClient {
             const titleMatch =
               aBlock.match(/title="([^"]*)"/i) || aBlock.match(/title='([^']*)'/i);
             const rawTitle = titleMatch
-              ? titleMatch[1]
-                  .replace(/&lt;/gi, '<')
-                  .replace(/&gt;/gi, '>')
-                  .replace(/<br\s*\/?>/gi, '\n')
-                  .replace(/<[^>]+>/g, '')
-                  .replace(/&amp;/gi, '&')
-                  .replace(/&quot;/gi, '"')
-                  .replace(/&#039;/gi, "'")
-                  .replace(/&nbsp;/gi, ' ')
+              ? decodeHtmlEntities(titleMatch[1], {
+                  stripTags: true,
+                  preserveNewlines: true,
+                })
               : '';
 
             const getTitleField = (labelPattern: string): string => {
@@ -1452,16 +1570,85 @@ class LibrusClient {
             });
           }
         }
+
+        // Reconcile parsed row marks with the row's 5 trailing summary columns (c0=excused, c1=absent, c3=late, c4=exempt)
+        if (rowSummary) {
+          const rowMarks = marks.slice(rowMarksStartIdx);
+          let parsedExcused = rowMarks.filter((m) => m.kind === 'excused').length;
+          const parsedAbsent = rowMarks.filter((m) => m.kind === 'absent').length;
+          const parsedLate = rowMarks.filter((m) => m.kind === 'late').length;
+
+          // If any marks on this row were classified as 'other' while rowSummary.excused has uncounted marks
+          if (parsedExcused < rowSummary.excused) {
+            for (const rm of rowMarks) {
+              if (rm.kind === 'other' && parsedExcused < rowSummary.excused) {
+                rm.kind = 'excused';
+                rm.name = rm.name || 'Nieobecność usprawiedliwiona';
+                parsedExcused++;
+              }
+            }
+          }
+
+          // Synthesize any still-missing marks indicated by the Librus row summary columns
+          const addMissingRowMarks = (
+            targetCount: number,
+            currentCount: number,
+            kind: 'excused' | 'absent' | 'late',
+            symbol: string,
+            name: string
+          ) => {
+            const missing = targetCount - currentCount;
+            if (missing <= 0) return;
+            const usedHours = new Set(
+              marks
+                .filter((m) => m.date === rowDate && m.hourNumber != null)
+                .map((m) => m.hourNumber!)
+            );
+            let nextHour = firstSlotHour > 0 ? firstSlotHour : 1;
+            for (let k = 0; k < missing; k++) {
+              while (usedHours.has(nextHour)) nextHour++;
+              usedHours.add(nextHour);
+              marks.push({
+                id: `nb-row-${rowDate}-${kind}-${markSeq++}`,
+                date: rowDate,
+                hourNumber: nextHour,
+                kind,
+                symbol,
+                name,
+                semester: rowSemester,
+              });
+            }
+          };
+
+          addMissingRowMarks(
+            rowSummary.excused,
+            parsedExcused,
+            'excused',
+            'u',
+            'Nieobecność usprawiedliwiona'
+          );
+          addMissingRowMarks(
+            rowSummary.absent,
+            parsedAbsent,
+            'absent',
+            'nb',
+            'Nieobecność nieusprawiedliwiona'
+          );
+          addMissingRowMarks(rowSummary.late, parsedLate, 'late', 'sp', 'Spóźnienie');
+        }
       }
 
       const scrapedPercent: number | null = null;
 
-      // 2. Parse zrealizowane_lekcje
-      const realizations: LessonRealization[] = [];
+      // 2. Parse zrealizowane_lekcje (or reuse cached realizations during lightweight background sync)
+      const realizations: LessonRealization[] = includeRealizations
+        ? []
+        : (getCachedRealizations() ?? []);
       let realSeq = 1;
 
-      const realRows =
-        realHtml.match(/<tr\b[^>]*class="[^"]*\bline[01]\b[^"]*"[^>]*>[\s\S]*?<\/tr>/gi) || [];
+      const realRows = includeRealizations
+        ? realHtml.match(/<tr\b[^>]*class="[^"]*\bline[01]\b[^"]*"[^>]*>[\s\S]*?<\/tr>/gi) || []
+        : [];
 
       for (const rowHtml of realRows) {
         const tds = [...rowHtml.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1]);
@@ -1529,6 +1716,45 @@ class LibrusClient {
         });
       }
 
+      // Backfill missing subjects on attendance marks using realizations from zrealizowane_lekcje
+      if (realizations.length > 0 && marks.length > 0) {
+        const realSubjByDateHour = new Map<string, { subject: string; teacher?: string }>();
+        const realSubjByDate = new Map<string, string[]>();
+        for (const r of realizations) {
+          if (r.date && r.subject) {
+            if (r.hourNumber != null) {
+              realSubjByDateHour.set(`${r.date}#${r.hourNumber}`, {
+                subject: r.subject,
+                teacher: r.teacher,
+              });
+            }
+            const list = realSubjByDate.get(r.date) || [];
+            list.push(r.subject);
+            realSubjByDate.set(r.date, list);
+          }
+        }
+        for (const m of marks) {
+          if (!m.subject && m.date) {
+            if (m.hourNumber != null) {
+              const exact = realSubjByDateHour.get(`${m.date}#${m.hourNumber}`);
+              if (exact) {
+                m.subject = exact.subject;
+                if (!m.teacher && exact.teacher) {
+                  m.teacher = exact.teacher;
+                  m.addedBy = exact.teacher;
+                }
+              }
+            }
+            if (!m.subject) {
+              const daySubjs = realSubjByDate.get(m.date);
+              if (daySubjs && daySubjs.length > 0) {
+                m.subject = daySubjs[(m.hourNumber ? m.hourNumber - 1 : 0) % daySubjs.length];
+              }
+            }
+          }
+        }
+      }
+
       const hasAnyAttendance =
         marks.length > 0 ||
         summaryTotals.absent > 0 ||
@@ -1547,7 +1773,9 @@ class LibrusClient {
       );
 
       saveCachedAttendanceMarks(marks);
-      saveCachedRealizations(realizations);
+      if (includeRealizations) {
+        saveCachedRealizations(realizations);
+      }
       saveCachedAttendanceStats(stats);
 
       return { marks, realizations, stats };
@@ -1635,11 +1863,11 @@ class LibrusClient {
           subjIdx + 1 < tds.length ? this.decodeHtml(tds[subjIdx + 1]).trim() : '';
 
         const isRowBold =
-          /font-weight\s*:\s*bold/i.test(tdsAttrs[senderIdx] || '') ||
-          /font-weight\s*:\s*bold/i.test(tdsAttrs[subjIdx] || '') ||
-          /font-weight\s*:\s*bold/i.test(rowHtml) ||
-          /<b\b/i.test(tds[senderIdx] || '') ||
-          /<b\b/i.test(tds[subjIdx] || '');
+          /font-weight\s*:\s*(?:bold|[6789]00)/i.test(tdsAttrs[senderIdx] || '') ||
+          /font-weight\s*:\s*(?:bold|[6789]00)/i.test(tdsAttrs[subjIdx] || '') ||
+          /font-weight\s*:\s*(?:bold|[6789]00)/i.test(rowHtml) ||
+          /<(?:b|strong)\b/i.test(tds[senderIdx] || '') ||
+          /<(?:b|strong)\b/i.test(tds[subjIdx] || '');
 
         const isUnread = folder === 'inbox' && isRowBold;
 
@@ -1684,8 +1912,13 @@ class LibrusClient {
 
       if (messages.length > 0) {
         saveCachedMessages(folder, messages);
+        return messages;
       }
-      return messages;
+      // Distinguish a genuinely empty folder from an unauthenticated / redirect HTML shell
+      if (/Brak\s+wiadomo[śs]ci|Nie\s+znaleziono\s+wiadomo[śs]ci/i.test(html)) {
+        return [];
+      }
+      return null;
     };
 
     try {
@@ -1806,20 +2039,10 @@ class LibrusClient {
       );
       const bodyHtml = contentMatch ? contentMatch[1].trim() : '';
 
-      const bodyText = bodyHtml
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/p>/gi, '\n\n')
-        .replace(/<\/div>/gi, '\n')
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;?/gi, ' ')
-        .replace(/&amp;/gi, '&')
-        .replace(/&quot;/gi, '"')
-        .replace(/&#0?39;|&apos;/gi, "'")
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>')
-        .replace(/\r\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+      const bodyText = decodeHtmlEntities(bodyHtml, {
+        stripTags: true,
+        preserveNewlines: true,
+      });
 
       // Extract attachments (Pliki / Załączniki) strictly after message content
       const unescapedBottom = bottomScope.replace(/\\\//g, '/');
@@ -1828,7 +2051,7 @@ class LibrusClient {
         .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
 
       const attachmentPaths = [
-        ...unescapedBottom.matchAll(/(wiadomosci\/pobierz_zalacznik\/[^"'\s<>)]+)/gi),
+        ...unescapedBottom.matchAll(/(wiadomosci\/pobierz_zalacznik\/\d+\/\d+(?:\/[a-zA-Z0-9_-]+)?)/gi),
       ].map((m) => m[1].replace(/\\+/g, ''));
       const uniquePaths = Array.from(new Set(attachmentPaths));
 
@@ -2080,10 +2303,21 @@ class LibrusClient {
     | { ok: true; bytes: Uint8Array; mimeType: string; fileName: string }
     | { ok: false; error: string }
   > {
-    const cleanPath = attachmentPath.replace(/^\/+/, '');
+    const cleanPath = decodeHtmlEntities(attachmentPath)
+      .replace(/^\/+/, '')
+      .replace(/&quot;.*$/i, '')
+      .replace(/["',;)\s]+$/g, '');
     const targetUrl = cleanPath.startsWith('http')
       ? cleanPath
       : `https://synergia.librus.pl/${cleanPath}`;
+
+    // Extract message ID from "wiadomosci/pobierz_zalacznik/<msgId>/<fileId>" so we can set accurate Referer
+    // and ensure the message view was opened in the active Synergia session
+    const msgIdMatch = cleanPath.match(/pobierz_zalacznik\/(\d+)\//i);
+    const msgId = msgIdMatch ? msgIdMatch[1] : null;
+    const messageRefererUrl = msgId
+      ? `https://synergia.librus.pl/wiadomosci/1/5/${msgId}`
+      : 'https://synergia.librus.pl/wiadomosci';
 
     const isInvalidOrHtml = (
       bytes: Uint8Array,
@@ -2110,16 +2344,28 @@ class LibrusClient {
     };
 
     const tryDownloadOnce = async (
-      useManualCookieOnInitialHop: boolean
+      useManualCookieOnInitialHop: boolean,
+      warmUpMessagePage: boolean
     ): Promise<
       | { status: 'ok'; bytes: Uint8Array; mimeType: string }
       | { status: 'relogin' }
       | { status: 'error'; error: string }
     > => {
+      if (warmUpMessagePage && msgId) {
+        try {
+          await this.xhrRequestArrayBuffer(messageRefererUrl, {
+            includeManualSynergiaCookie: useManualCookieOnInitialHop,
+            headers: {
+              Referer: 'https://synergia.librus.pl/wiadomosci/5',
+            },
+          });
+        } catch {}
+      }
+
       const r1 = await this.xhrRequestArrayBuffer(targetUrl, {
         includeManualSynergiaCookie: useManualCookieOnInitialHop,
         headers: {
-          Referer: 'https://synergia.librus.pl/wiadomosci',
+          Referer: messageRefererUrl,
         },
       });
 
@@ -2154,10 +2400,11 @@ class LibrusClient {
       const html = r1.text();
 
       const fetchGetFileUrl = async (rawGetFileUrl: string) => {
-        const baseGetFile = rawGetFileUrl.startsWith('http')
-          ? rawGetFileUrl
-          : `https://sandbox.librus.pl/${rawGetFileUrl.replace(/^\/+/, '')}`;
-        const getUrl = baseGetFile.endsWith('/get')
+        const cleaned = rawGetFileUrl.replace(/\\+/g, '').trim();
+        const baseGetFile = cleaned.startsWith('http')
+          ? cleaned
+          : `https://sandbox.librus.pl/${cleaned.replace(/^\/+/, '')}`;
+        const getUrl = /\/get(?:\?|$)/i.test(baseGetFile)
           ? baseGetFile
           : `${baseGetFile.replace(/\/+$/, '')}/get`;
 
@@ -2167,11 +2414,11 @@ class LibrusClient {
         });
       };
 
-      // Case 1: GetFile URL on sandbox.librus.pl
+      // Case 1: GetFile URL on sandbox.librus.pl (allow multi-segment paths under /GetFile/...)
       const getFileMatch =
-        finalUrl.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#/]+)/i) ||
-        html.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#/]+)/i) ||
-        html.match(/(\/GetFile\/[^"'\s<>?#/]+)/i);
+        finalUrl.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#]+)/i) ||
+        html.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#]+)/i) ||
+        html.match(/(\/GetFile\/[^"'\s<>?#]+)/i);
 
       if (getFileMatch) {
         const fileRes = await fetchGetFileUrl(getFileMatch[1]);
@@ -2193,11 +2440,17 @@ class LibrusClient {
         html.match(/singleUseKey\s*[:=]\s*["']([^"']+)["']/i);
 
       if (keyMatch && keyMatch[1]) {
-        const rawKey = keyMatch[1];
-        let decodedKey = rawKey;
-        try {
-          decodedKey = decodeURIComponent(rawKey);
-        } catch {}
+        const rawKey = keyMatch[1].trim();
+        // If rawKey is already percent-encoded (contains %XX), decode once; otherwise preserve literal '+'
+        const decodedKey = /%[0-9A-Fa-f]{2}/.test(rawKey)
+          ? (() => {
+              try {
+                return decodeURIComponent(rawKey);
+              } catch {
+                return rawKey;
+              }
+            })()
+          : rawKey;
         const encodedKey = encodeURIComponent(decodedKey);
 
         let readyDownloadUrl: string | null = null;
@@ -2228,7 +2481,9 @@ class LibrusClient {
               } catch {}
               break;
             }
-          } catch {}
+          } catch {
+            // Retry on transient check error
+          }
           await new Promise((r) => setTimeout(r, 400));
         }
 
@@ -2254,9 +2509,9 @@ class LibrusClient {
         // Check if CSDownload returned or redirected to a GetFile link
         const csHtml = fileRes.text();
         const csGetFile =
-          fileRes.url.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#/]+)/i) ||
-          csHtml.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#/]+)/i) ||
-          csHtml.match(/(\/GetFile\/[^"'\s<>?#/]+)/i);
+          fileRes.url.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#]+)/i) ||
+          csHtml.match(/(https?:\/\/[^"'\s<>]+\/GetFile\/[^"'\s<>?#]+)/i) ||
+          csHtml.match(/(\/GetFile\/[^"'\s<>?#]+)/i);
 
         if (csGetFile) {
           const gfRes = await fetchGetFileUrl(csGetFile[1]);
@@ -2277,8 +2532,8 @@ class LibrusClient {
     };
 
     try {
-      // 1. Try using native OkHttp CookieJar (so cross-domain redirects to sandbox.librus.pl preserve cookies)
-      let res = await tryDownloadOnce(false);
+      // 1. Try with manual Synergia cookie + message page warm-up first (since app requests use this.cookieStore)
+      let res = await tryDownloadOnce(true, true);
       if (res.status === 'ok') {
         return {
           ok: true,
@@ -2288,10 +2543,21 @@ class LibrusClient {
         };
       }
 
-      // 2. Re-authenticate to ensure fresh cookies in native OkHttp CookieJar and retry
+      // 2. Try using native OkHttp CookieJar with warm-up
+      res = await tryDownloadOnce(false, true);
+      if (res.status === 'ok') {
+        return {
+          ok: true,
+          bytes: res.bytes,
+          mimeType: res.mimeType,
+          fileName: fallbackName,
+        };
+      }
+
+      // 3. Re-authenticate to ensure fresh cookies in both CookieStore and native OkHttp CookieJar, then retry with warm-up
       const relogged = await this.reloginWithStoredCredentials();
       if (relogged) {
-        res = await tryDownloadOnce(false);
+        res = await tryDownloadOnce(true, true);
         if (res.status === 'ok') {
           return {
             ok: true,
@@ -2300,17 +2566,15 @@ class LibrusClient {
             fileName: fallbackName,
           };
         }
-      }
-
-      // 3. Fallback with manual Synergia cookie header on initial hop
-      res = await tryDownloadOnce(true);
-      if (res.status === 'ok') {
-        return {
-          ok: true,
-          bytes: res.bytes,
-          mimeType: res.mimeType,
-          fileName: fallbackName,
-        };
+        res = await tryDownloadOnce(false, true);
+        if (res.status === 'ok') {
+          return {
+            ok: true,
+            bytes: res.bytes,
+            mimeType: res.mimeType,
+            fileName: fallbackName,
+          };
+        }
       }
 
       return {
@@ -2348,7 +2612,7 @@ class LibrusClient {
       const csrfMatch = composeHtml.match(/csrfTokenValue\s*=\s*["']([^"']+)["']/i);
       const csrfToken = csrfMatch ? csrfMatch[1] : '';
 
-      const groups: Array<'wychowawca' | 'nauczyciel' | 'sekretariat' | 'bibliotekarz'> = [
+      const groups: ('wychowawca' | 'nauczyciel' | 'sekretariat' | 'bibliotekarz')[] = [
         'wychowawca',
         'nauczyciel',
         'sekretariat',

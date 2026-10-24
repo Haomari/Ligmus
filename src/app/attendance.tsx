@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,6 +16,7 @@ import { computeDetailedAttendance } from '@/services/timetableMapper';
 import { SemesterFilter, SubjectAttendanceStat } from '@/types/librus';
 import { getSubjectColor } from '@/utils/subjectColors';
 import { AttendanceIcon } from '@/components/timetable/AttendanceIcon';
+import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 
 const SEMESTER_OPTIONS: { key: SemesterFilter; label: string }[] = [
   { key: 'sem1', label: 'Semestr 1' },
@@ -33,7 +35,10 @@ function getStatusColor(percent: number | null): string {
 export default function AttendanceScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
   const {
+    attendanceStats,
     attendanceMarks,
     realizations,
     weeks,
@@ -52,9 +57,10 @@ export default function AttendanceScreen() {
         realizations,
         weeks,
         semester,
-        selectedSubject
+        selectedSubject,
+        attendanceStats
       ),
-    [attendanceMarks, realizations, weeks, semester, selectedSubject]
+    [attendanceMarks, realizations, weeks, semester, selectedSubject, attendanceStats]
   );
 
   const { overall, bySubject, lowAttendanceSubjects, filteredMarks } = detailed;
@@ -74,10 +80,9 @@ export default function AttendanceScreen() {
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.header}>
         <View style={styles.headerTopRow}>
-          <View>
-            <Text style={styles.headerTitle}>Frekwencja</Text>
-            <Text style={styles.headerSub}>
-              Analiza obecności z podziałem na przedmioty i semestry
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              Frekwencja
             </Text>
           </View>
           {overall.absent > 0 && (
@@ -136,9 +141,6 @@ export default function AttendanceScreen() {
                 Zagrożenie nieklasyfikowaniem (&lt; 50%)
               </Text>
             </View>
-            <Text style={styles.alertDesc}>
-              W wybranym okresie następujące przedmioty mają frekwencję poniżej 50%:
-            </Text>
             <View style={styles.alertSubjectsList}>
               {criticalSubjects.map((sub) => (
                 <TouchableOpacity
@@ -149,9 +151,18 @@ export default function AttendanceScreen() {
                     )
                   }
                   style={styles.alertSubjectRow}>
-                  <Text style={styles.alertSubjectName}>{sub.subject}</Text>
+                  <View style={styles.alertSubjectTopRow}>
+                    <Text style={styles.alertSubjectName} numberOfLines={2}>
+                      {sub.subject}
+                    </Text>
+                    <View style={styles.alertPercentBadgeDanger}>
+                      <Text style={styles.alertPercentTextDanger}>
+                        {sub.percent.toFixed(1)}%
+                      </Text>
+                    </View>
+                  </View>
                   <Text style={styles.alertSubjectMetaDanger}>
-                    {sub.percent.toFixed(1)}% ({sub.present + sub.late}/{sub.total}) • brakuje{' '}
+                    {sub.present + sub.late}/{sub.total} obecności • brakuje{' '}
                     {sub.mustAttendFor50} ob. do 50%
                   </Text>
                 </TouchableOpacity>
@@ -178,9 +189,18 @@ export default function AttendanceScreen() {
                     )
                   }
                   style={styles.alertSubjectRow}>
-                  <Text style={styles.alertSubjectName}>{sub.subject}</Text>
+                  <View style={styles.alertSubjectTopRow}>
+                    <Text style={styles.alertSubjectName} numberOfLines={2}>
+                      {sub.subject}
+                    </Text>
+                    <View style={styles.alertPercentBadgeWarning}>
+                      <Text style={styles.alertPercentTextWarning}>
+                        {sub.percent.toFixed(1)}%
+                      </Text>
+                    </View>
+                  </View>
                   <Text style={styles.alertSubjectMetaWarning}>
-                    {sub.percent.toFixed(1)}% ({sub.present + sub.late}/{sub.total}) • zapas:{' '}
+                    {sub.present + sub.late}/{sub.total} obecności • zapas:{' '}
                     {sub.canMissFor50} lekcji
                   </Text>
                 </TouchableOpacity>
@@ -395,7 +415,15 @@ export default function AttendanceScreen() {
                 </Text>
               </View>
             ) : (
-              <View style={styles.subjectsList}>
+              <View
+                style={[
+                  styles.subjectsList,
+                  isWideScreen && {
+                    flexDirection: 'row',
+                    flexWrap: 'wrap',
+                    justifyContent: 'space-between',
+                  },
+                ]}>
                 {bySubject.map((sub) => {
                   const subjColor = getSubjectColor(sub.subject);
                   const statusColor = getStatusColor(sub.percent);
@@ -406,6 +434,7 @@ export default function AttendanceScreen() {
                       onPress={() => setSelectedSubject(sub.subject)}
                       style={[
                         styles.subjectCard,
+                        isWideScreen && { width: '48.8%' },
                         sub.status === 'danger' && styles.subjectCardDanger,
                         sub.status === 'warning' && styles.subjectCardWarning,
                       ]}>
@@ -551,19 +580,19 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 10,
   },
+  headerTitleWrap: {
+    flex: 1,
+    marginRight: 8,
+  },
   headerTitle: {
     fontSize: 24,
     fontWeight: '800',
     color: '#f8fafc',
   },
-  headerSub: {
-    fontSize: 12,
-    color: '#94a3b8',
-    marginTop: 2,
-  },
   excuseShortcutBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
     gap: 6,
     backgroundColor: 'rgba(56, 189, 248, 0.14)',
     borderWidth: 1,
@@ -639,37 +668,65 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     flex: 1,
   },
-  alertDesc: {
-    color: '#cbd5e1',
-    fontSize: 12,
-  },
   alertSubjectsList: {
-    gap: 6,
+    gap: 8,
   },
   alertSubjectRow: {
+    flexDirection: 'column',
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 10,
+    gap: 4,
+  },
+  alertSubjectTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(15, 23, 42, 0.65)',
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 10,
-    gap: 8,
+    gap: 10,
   },
   alertSubjectName: {
     color: '#f8fafc',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
     flex: 1,
   },
+  alertPercentBadgeDanger: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    flexShrink: 0,
+  },
+  alertPercentTextDanger: {
+    color: '#fca5a5',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  alertPercentBadgeWarning: {
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    flexShrink: 0,
+  },
+  alertPercentTextWarning: {
+    color: '#fde68a',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   alertSubjectMetaDanger: {
     color: '#fca5a5',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
   },
   alertSubjectMetaWarning: {
     color: '#fde68a',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
   },
   filterSection: {

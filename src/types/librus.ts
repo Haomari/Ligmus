@@ -175,6 +175,21 @@ export interface ExcuseTemplateSettings {
   signatureOverride?: string;
 }
 
+export interface ExcusePreset {
+  id: string;
+  name: string;
+  subject: string;
+  introText: string;
+  reasonText: string;
+}
+
+export interface ExcusePresetsStore {
+  activePresetId: string;
+  customEducatorName: string;
+  customSignature: string;
+  presets: ExcusePreset[];
+}
+
 export interface StudentInfo {
   name: string;
   classGroup: string;

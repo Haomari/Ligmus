@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ligmus",
     "slug": "Ligmus",
-    "version": "v0.5.5-alpha",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "ligmus",
@@ -19,7 +19,14 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.anonymous.Ligmus",
-      "permissions": ["NOTIFICATIONS"]
+      "versionCode": 2,
+      "permissions": [
+        "NOTIFICATIONS",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK",
+        "REQUEST_INSTALL_PACKAGES"
+      ]
     },
     "web": {
       "output": "static",

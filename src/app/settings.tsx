@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
-  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -12,7 +12,8 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Directory } from 'expo-file-system';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
 import {
   DEFAULT_SYNC_SETTINGS,
@@ -20,38 +21,233 @@ import {
   isExpoGo,
   requestNotificationPermissions,
   saveSyncSettings,
-  sendTestNotification,
   SyncSettings,
 } from '@/services/backgroundSync';
 import {
-  DEFAULT_EXCUSE_SETTINGS,
+  DEFAULT_EXCUSE_PRESETS,
+  formatDownloadFolderLabel,
   getCurrentSchoolYearId,
-  getExcuseSettings,
-  saveExcuseSettings,
+  getDownloadFolderUri,
+  getExcusePresetsStore,
+  saveDownloadFolderUri,
+  saveExcusePresetsStore,
 } from '@/services/fileCache';
-import { ExcuseTemplateSettings } from '@/types/librus';
+import { ExcusePreset, ExcusePresetsStore } from '@/types/librus';
 import { formatShortStudentSignature } from '@/components/message-compose-modal';
+import { ToastBanner } from '@/components/toast-banner';
+import {
+  APP_VERSION,
+  checkForAppUpdate,
+  formatVersionTag,
+  getMockPreviewUpdate,
+  UpdateCheckResult,
+} from '@/services/updateService';
+import { UpdateModal } from '@/components/update-modal';
+
+const MAX_EXCUSE_PRESETS = 8;
 
 export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const {
-    student,
-    isLoading,
-    refreshData,
-    clearLocalCacheAndRefresh,
-    logout,
-  } = useLibrus();
+  const { student, clearLocalCacheAndRefresh, logout } = useLibrus();
 
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(DEFAULT_SYNC_SETTINGS);
-  const [excuseTemplate, setExcuseTemplate] = useState<ExcuseTemplateSettings>(
-    DEFAULT_EXCUSE_SETTINGS
+  const [excuseStore, setExcuseStore] = useState<ExcusePresetsStore>(() =>
+    getExcusePresetsStore()
   );
+  const [showExcuseAdvanced, setShowExcuseAdvanced] = useState<boolean>(() => {
+    const initial = getExcusePresetsStore();
+    return Boolean(
+      initial.customEducatorName.trim() || initial.customSignature.trim()
+    );
+  });
+  const [downloadFolderUri, setDownloadFolderUri] = useState<string | null>(() =>
+    getDownloadFolderUri()
+  );
+  const [clearingCache, setClearingCache] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateModalInfo, setUpdateModalInfo] = useState<UpdateCheckResult | null>(null);
 
   useEffect(() => {
     getSyncSettings().then(setSyncSettings);
-    setExcuseTemplate(getExcuseSettings());
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      Promise.resolve().then(() => {
+        if (!active) return;
+        setExcuseStore(getExcusePresetsStore());
+        setDownloadFolderUri(getDownloadFolderUri());
+      });
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
+
+  const activePreset: ExcusePreset = useMemo(() => {
+    return (
+      excuseStore.presets.find((p) => p.id === excuseStore.activePresetId) ??
+      excuseStore.presets[0] ??
+      DEFAULT_EXCUSE_PRESETS[0]
+    );
+  }, [excuseStore.presets, excuseStore.activePresetId]);
+
+  const updateActivePreset = (patch: Partial<ExcusePreset>) => {
+    setExcuseStore((prev) => ({
+      ...prev,
+      presets: prev.presets.map((p) =>
+        p.id === activePreset.id ? { ...p, ...patch } : p
+      ),
+    }));
+  };
+
+  const handleSelectPresetTab = (presetId: string) => {
+    setExcuseStore((prev) => ({ ...prev, activePresetId: presetId }));
+  };
+
+  const handleAddPreset = () => {
+    if (excuseStore.presets.length >= MAX_EXCUSE_PRESETS) {
+      Alert.alert(
+        'Limit szablonów',
+        `Możesz utworzyć maksymalnie ${MAX_EXCUSE_PRESETS} szablonów usprawiedliwień.`
+      );
+      return;
+    }
+    const nextNumber = excuseStore.presets.length + 1;
+    const newPreset: ExcusePreset = {
+      id: `preset-${Date.now()}`,
+      name: `Szablon ${nextNumber}`,
+      subject: activePreset.subject || 'Usprawiedliwienie',
+      introText:
+        activePreset.introText ||
+        DEFAULT_EXCUSE_PRESETS[0].introText,
+      reasonText: '',
+    };
+    const updated: ExcusePresetsStore = {
+      ...excuseStore,
+      activePresetId: newPreset.id,
+      presets: [...excuseStore.presets, newPreset],
+    };
+    setExcuseStore(updated);
+    saveExcusePresetsStore(updated);
+    setToastMessage(`Dodano „${newPreset.name}”`);
+  };
+
+  const handleDeleteActivePreset = () => {
+    if (excuseStore.presets.length <= 1) return;
+    Alert.alert(
+      'Usuń szablon',
+      `Czy chcesz usunąć szablon „${activePreset.name || 'Szablon'}”?`,
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Usuń',
+          style: 'destructive',
+          onPress: () => {
+            const remaining = excuseStore.presets.filter((p) => p.id !== activePreset.id);
+            const updated: ExcusePresetsStore = {
+              ...excuseStore,
+              activePresetId: remaining[0].id,
+              presets: remaining,
+            };
+            setExcuseStore(updated);
+            saveExcusePresetsStore(updated);
+            setToastMessage('Usunięto szablon');
+          },
+        },
+      ]
+    );
+  };
+
+  const handleSaveExcusePresets = () => {
+    const normalizedPresets = excuseStore.presets.map((p, idx) => ({
+      ...p,
+      name: p.name.trim() || `Szablon ${idx + 1}`,
+      subject: p.subject.trim() || 'Usprawiedliwienie',
+    }));
+    const updated: ExcusePresetsStore = {
+      ...excuseStore,
+      presets: normalizedPresets,
+    };
+    setExcuseStore(updated);
+    saveExcusePresetsStore(updated);
+    setToastMessage('Zapisano szablony usprawiedliwień');
+  };
+
+  const handleResetExcusePresets = () => {
+    Alert.alert(
+      'Przywróć domyślne szablony',
+      'Czy chcesz przywrócić domyślną listę szablonów usprawiedliwień?',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Przywróć',
+          style: 'destructive',
+          onPress: () => {
+            const resetStore: ExcusePresetsStore = {
+              activePresetId: DEFAULT_EXCUSE_PRESETS[0].id,
+              customEducatorName: '',
+              customSignature: '',
+              presets: DEFAULT_EXCUSE_PRESETS.map((p) => ({ ...p })),
+            };
+            setExcuseStore(resetStore);
+            saveExcusePresetsStore(resetStore);
+            setToastMessage('Przywrócono domyślne szablony');
+          },
+        },
+      ]
+    );
+  };
+
+  const handleCheckForUpdates = async () => {
+    setCheckingUpdate(true);
+    try {
+      const res = await checkForAppUpdate();
+      if (res.updateAvailable) {
+        setUpdateModalInfo(res);
+      } else {
+        setToastMessage(
+          `Masz najnowszą wersję aplikacji (${formatVersionTag(res.currentVersion)})`
+        );
+      }
+    } catch {
+      Alert.alert(
+        'Błąd sprawdzania aktualizacji',
+        'Nie udało się połączyć z GitHub Releases. Sprawdź połączenie z internetem.'
+      );
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handlePreviewUpdateModal = () => {
+    if (__DEV__) {
+      setUpdateModalInfo(getMockPreviewUpdate());
+    }
+  };
+
+  const handleChooseDownloadFolder = async () => {
+    try {
+      const pickedDir = await Directory.pickDirectoryAsync();
+      saveDownloadFolderUri(pickedDir.uri);
+      setDownloadFolderUri(pickedDir.uri);
+      setToastMessage(`Zmieniono folder: ${formatDownloadFolderLabel(pickedDir.uri)}`);
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (!/cancel/i.test(msg)) {
+        Alert.alert('Błąd', 'Nie udało się wybrać folderu pobierania.');
+      }
+    }
+  };
+
+  const handleResetDownloadFolder = () => {
+    saveDownloadFolderUri(null);
+    setDownloadFolderUri(null);
+    setToastMessage('Przywrócono pytanie o folder przy pobraniu');
+  };
 
   const handleToggleSync = async (enabled: boolean) => {
     if (enabled && !isExpoGo) {
@@ -59,7 +255,7 @@ export default function SettingsScreen() {
       if (!granted) {
         Alert.alert(
           'Brak uprawnień',
-          'Aplikacja wymaga uprawnień do powiadomień, aby móc informować Cię o nowych ocenach i wiadomościach w tle.'
+          'Aplikacja wymaga uprawnień do powiadomień, aby informować Cię o nowych wiadomościach i ocenach w tle.'
         );
         return;
       }
@@ -81,53 +277,23 @@ export default function SettingsScreen() {
     await saveSyncSettings(updated);
   };
 
-  const handleSendTestNotification = async () => {
-    if (isExpoGo) {
-      Alert.alert(
-        'Tryb Expo Go',
-        'Powiadomienia push oraz w tle wymagają dedykowanej paczki APK (komenda: npx expo run:android), z uwagi na ograniczenia modułów natywnych w Expo Go.'
-      );
-      return;
-    }
-    const granted = await requestNotificationPermissions();
-    if (!granted) {
-      Alert.alert(
-        'Brak uprawnień',
-        'Zezwól na powiadomienia w ustawieniach systemu, aby odebrać powiadomienie testowe.'
-      );
-      return;
-    }
-    const success = await sendTestNotification();
-    if (success) {
-      Alert.alert('Sukces', 'Wysłano testowe powiadomienie! Sprawdź pasek powiadomień.');
-    } else {
-      Alert.alert('Błąd', 'Nie udało się wysłać testowego powiadomienia.');
-    }
-  };
-
-  const handleSaveExcuseTemplate = () => {
-    saveExcuseSettings(excuseTemplate);
-    Alert.alert('Zapisano', 'Szablon usprawiedliwień został zapisany.');
-  };
-
-  const handleResetExcuseTemplate = () => {
-    setExcuseTemplate(DEFAULT_EXCUSE_SETTINGS);
-    saveExcuseSettings(DEFAULT_EXCUSE_SETTINGS);
-    Alert.alert('Przywrócono', 'Przywrócono domyślny szablon usprawiedliwień.');
-  };
-
   const handleClearCache = () => {
     Alert.alert(
       'Wyczyść pamięć podręczną',
-      'Czy chcesz wyczyścić zapisane dane ocen, planu lekcji, frekwencji oraz wiadomości i pobrać je na nowo z Librusa? Twoje dane logowania oraz szablony zostaną zachowane.',
+      'Zapisane oceny, plan lekcji, frekwencja i wiadomości zostaną pobrane na nowo z Librusa. Twoje logowanie oraz szablony pozostaną bez zmian.',
       [
         { text: 'Anuluj', style: 'cancel' },
         {
-          text: 'Wyczyść i odśwież',
+          text: 'Wyczyść i synchronizuj',
           style: 'destructive',
           onPress: async () => {
-            await clearLocalCacheAndRefresh();
-            Alert.alert('Gotowe', 'Pamięć podręczna została wyczyszczona i odświeżona.');
+            setClearingCache(true);
+            try {
+              await clearLocalCacheAndRefresh();
+              setToastMessage('Wyczyszczono pamięć podręczną i pobrano świeże dane');
+            } finally {
+              setClearingCache(false);
+            }
           },
         },
       ]
@@ -177,55 +343,96 @@ export default function SettingsScreen() {
               </Text>
             </View>
             <View style={styles.profileInfo}>
-              <Text style={styles.studentName}>{student?.name || 'Uczeń'}</Text>
+              <View style={styles.profileTopLine}>
+                <Text style={styles.studentName} numberOfLines={1}>
+                  {student?.name || 'Uczeń'}
+                </Text>
+                <View style={styles.schoolYearBadge}>
+                  <Text style={styles.schoolYearBadgeText}>{schoolYearId}</Text>
+                </View>
+              </View>
               <Text style={styles.studentClass}>
                 {student?.classGroup || 'Konto Librus'}
+                {student?.educator ? ` • Wych. ${student.educator}` : ''}
               </Text>
-              {student?.educator ? (
-                <Text style={styles.studentMeta}>
-                  Wychowawca: {student.educator}
-                </Text>
-              ) : null}
             </View>
           </View>
         </View>
 
-        {/* Excuse Template Settings */}
+        {/* Excuse Presets Section */}
         <View style={styles.section}>
-          <Text style={styles.sectionHeader}>Szablon usprawiedliwień</Text>
+          <Text style={styles.sectionHeader}>Szablony usprawiedliwień</Text>
 
           <View style={[styles.card, { gap: 12 }]}>
-            <Text style={styles.templateHint}>
-              Dostosuj domyślny tekst generowany po kliknięciu przycisku „Usprawiedliwienie” w zakładce Wiadomości.
-            </Text>
+            {/* Segmented Preset Bar (Sz1 | Sz2 | Sz3 | +) */}
+            <View style={styles.presetBarContainer}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.presetTabsScroll}>
+                {excuseStore.presets.map((preset, idx) => {
+                  const isSelected = preset.id === activePreset.id;
+                  return (
+                    <TouchableOpacity
+                      key={preset.id}
+                      activeOpacity={0.8}
+                      onPress={() => handleSelectPresetTab(preset.id)}
+                      style={[
+                        styles.presetTab,
+                        isSelected && styles.presetTabActive,
+                      ]}>
+                      <Text
+                        style={[
+                          styles.presetTabText,
+                          isSelected && styles.presetTabTextActive,
+                        ]}
+                        numberOfLines={1}>
+                        {preset.name.trim() || `Sz${idx + 1}`}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+                {excuseStore.presets.length < MAX_EXCUSE_PRESETS && (
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={handleAddPreset}
+                    style={styles.presetAddBtn}>
+                    <Ionicons name="add" size={16} color="#38bdf8" />
+                    <Text style={styles.presetAddBtnText}>Dodaj</Text>
+                  </TouchableOpacity>
+                )}
+              </ScrollView>
+            </View>
 
+            {/* Preset Name & Delete */}
             <View style={styles.inputGroup}>
-              <Text style={styles.inputLabel}>Temat wiadomości</Text>
+              <View style={styles.labelRow}>
+                <Text style={styles.inputLabel}>Nazwa szablonu</Text>
+                {excuseStore.presets.length > 1 && (
+                  <TouchableOpacity
+                    onPress={handleDeleteActivePreset}
+                    hitSlop={8}
+                    style={styles.deletePresetBtn}>
+                    <Ionicons name="trash-outline" size={13} color="#ef4444" />
+                    <Text style={styles.deletePresetText}>Usuń szablon</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               <TextInput
-                value={excuseTemplate.subject}
-                onChangeText={(subject) =>
-                  setExcuseTemplate((prev) => ({ ...prev, subject }))
-                }
-                placeholder="Usprawiedliwienie"
+                value={activePreset.name}
+                onChangeText={(name) => updateActivePreset({ name })}
+                placeholder="Np. Rodzinne, Choroba, Lekarz..."
                 placeholderTextColor="#64748b"
                 style={styles.textInput}
               />
             </View>
 
             <View style={styles.inputGroup}>
-              <Text style={styles.inputLabel}>
-                Wychowawca klasy (opcjonalnie nadpisz)
-              </Text>
+              <Text style={styles.inputLabel}>Temat wiadomości</Text>
               <TextInput
-                value={excuseTemplate.customEducatorName}
-                onChangeText={(customEducatorName) =>
-                  setExcuseTemplate((prev) => ({ ...prev, customEducatorName }))
-                }
-                placeholder={
-                  student?.educator
-                    ? `Domyślnie z Librusa: ${student.educator}`
-                    : 'Domyślnie wykrywany z Librusa'
-                }
+                value={activePreset.subject}
+                onChangeText={(subject) => updateActivePreset({ subject })}
+                placeholder="Usprawiedliwienie"
                 placeholderTextColor="#64748b"
                 style={styles.textInput}
               />
@@ -234,10 +441,8 @@ export default function SettingsScreen() {
             <View style={styles.inputGroup}>
               <Text style={styles.inputLabel}>Tekst powitania (przed listą dat)</Text>
               <TextInput
-                value={excuseTemplate.introText}
-                onChangeText={(introText) =>
-                  setExcuseTemplate((prev) => ({ ...prev, introText }))
-                }
+                value={activePreset.introText}
+                onChangeText={(introText) => updateActivePreset({ introText })}
                 multiline
                 style={[styles.textInput, styles.textInputMultiline]}
               />
@@ -246,36 +451,72 @@ export default function SettingsScreen() {
             <View style={styles.inputGroup}>
               <Text style={styles.inputLabel}>Powód nieobecności (po liście dat)</Text>
               <TextInput
-                value={excuseTemplate.reasonText}
-                onChangeText={(reasonText) =>
-                  setExcuseTemplate((prev) => ({ ...prev, reasonText }))
-                }
+                value={activePreset.reasonText}
+                onChangeText={(reasonText) => updateActivePreset({ reasonText })}
+                placeholder="Np. Nieobecność była spowodowana ważnymi względami rodzinnymi."
+                placeholderTextColor="#64748b"
                 multiline
                 style={[styles.textInput, styles.textInputMultiline]}
               />
             </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.inputLabel}>Podpis pod wiadomością</Text>
-              <TextInput
-                value={excuseTemplate.customSignature}
-                onChangeText={(customSignature) =>
-                  setExcuseTemplate((prev) => ({ ...prev, customSignature }))
-                }
-                placeholder={`Domyślnie z Librusa: ${autoSignature}`}
-                placeholderTextColor="#64748b"
-                style={styles.textInput}
+            {/* Collapsible Educator & Signature Overrides */}
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => setShowExcuseAdvanced((prev) => !prev)}
+              style={styles.advancedToggleRow}>
+              <Text style={styles.advancedToggleText}>
+                Nadpisz wychowawcę lub podpis (opcjonalnie)
+              </Text>
+              <Ionicons
+                name={showExcuseAdvanced ? 'chevron-up' : 'chevron-down'}
+                size={16}
+                color="#94a3b8"
               />
-            </View>
+            </TouchableOpacity>
+
+            {showExcuseAdvanced && (
+              <View style={styles.advancedFieldsWrap}>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Wychowawca klasy</Text>
+                  <TextInput
+                    value={excuseStore.customEducatorName}
+                    onChangeText={(customEducatorName) =>
+                      setExcuseStore((prev) => ({ ...prev, customEducatorName }))
+                    }
+                    placeholder={
+                      student?.educator
+                        ? `Domyślnie z Librusa: ${student.educator}`
+                        : 'Domyślnie wykrywany z Librusa'
+                    }
+                    placeholderTextColor="#64748b"
+                    style={styles.textInput}
+                  />
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Podpis pod wiadomością</Text>
+                  <TextInput
+                    value={excuseStore.customSignature}
+                    onChangeText={(customSignature) =>
+                      setExcuseStore((prev) => ({ ...prev, customSignature }))
+                    }
+                    placeholder={`Domyślnie z Librusa: ${autoSignature}`}
+                    placeholderTextColor="#64748b"
+                    style={styles.textInput}
+                  />
+                </View>
+              </View>
+            )}
 
             <View style={styles.templateButtonsRow}>
               <TouchableOpacity
-                onPress={handleResetExcuseTemplate}
+                onPress={handleResetExcusePresets}
                 style={styles.resetTemplateBtn}>
                 <Text style={styles.resetTemplateBtnText}>Domyślne</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={handleSaveExcuseTemplate}
+                onPress={handleSaveExcusePresets}
                 style={styles.saveTemplateBtn}>
                 <Ionicons name="checkmark-circle-outline" size={17} color="#ffffff" />
                 <Text style={styles.saveTemplateBtnText}>Zapisz szablon</Text>
@@ -284,76 +525,25 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Account / Connection Status & School Year Cache */}
+        {/* Notifications */}
         <View style={styles.section}>
-          <Text style={styles.sectionHeader}>
-            Konto i pamięć podręczna ({schoolYearId})
-          </Text>
-
-          <View style={styles.card}>
-            <TouchableOpacity
-              style={styles.actionRow}
-              onPress={async () => {
-                await refreshData();
-                Alert.alert('Sukces', 'Dane zostały pomyślnie odświeżone!');
-              }}>
-              <Ionicons name="sync-outline" size={20} color="#38bdf8" />
-              <Text style={styles.actionText}>
-                {isLoading ? 'Odświeżanie...' : 'Wymuś odświeżenie danych'}
-              </Text>
-              <Ionicons name="chevron-forward" size={18} color="#64748b" />
-            </TouchableOpacity>
-
-            <View style={styles.divider} />
-
-            <TouchableOpacity
-              style={styles.actionRow}
-              onPress={handleClearCache}>
-              <Ionicons name="trash-outline" size={20} color="#f59e0b" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.actionText}>Wyczyść pamięć podręczną</Text>
-                <Text style={styles.actionSubText}>
-                  Automatyczny reset następuje co roku 1 września ({schoolYearId})
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={18} color="#64748b" />
-            </TouchableOpacity>
-
-            <View style={styles.divider} />
-
-            <TouchableOpacity
-              style={styles.actionRow}
-              onPress={() => router.push('/login' as any)}>
-              <Ionicons name="key-outline" size={20} color="#38bdf8" />
-              <Text style={styles.actionText}>Zmień konto / Zaloguj ponownie</Text>
-              <Ionicons name="chevron-forward" size={18} color="#64748b" />
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Smart Sync & Notifications */}
-        <View style={styles.section}>
-          <Text style={styles.sectionHeader}>Powiadomienia i Smart Sync</Text>
+          <Text style={styles.sectionHeader}>Powiadomienia</Text>
 
           {isExpoGo && (
             <View style={styles.expoGoBanner}>
-              <Ionicons name="information-circle-outline" size={20} color="#38bdf8" />
-              <View style={styles.expoGoBannerTextCol}>
-                <Text style={styles.expoGoBannerTitle}>Tryb podglądu Expo Go</Text>
-                <Text style={styles.expoGoBannerDesc}>
-                  Konfiguracja interfejsu i ustawień jest aktywna. Wysyłanie powiadomień w tle wymaga własnej paczki APK (<Text style={styles.expoGoCode}>npx expo run:android</Text>).
-                </Text>
-              </View>
+              <Ionicons name="information-circle-outline" size={17} color="#38bdf8" />
+              <Text style={styles.expoGoBannerDesc}>
+                Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji APK.
+              </Text>
             </View>
           )}
 
           <View style={styles.card}>
-            {/* Toggle Background Notifications */}
             <View style={styles.switchRow}>
               <View style={styles.switchTextCol}>
                 <Text style={styles.switchTitle}>Powiadomienia w tle</Text>
                 <Text style={styles.switchDesc}>
-                  Automatycznie sprawdza nowe oceny, wiadomości i zmiany w planie
+                  Automatycznie sprawdza nowe wiadomości, oceny i zmiany w planie
                 </Text>
               </View>
               <Switch
@@ -368,7 +558,6 @@ export default function SettingsScreen() {
               <>
                 <View style={styles.divider} />
 
-                {/* Interval Selector */}
                 <View style={styles.settingBlock}>
                   <Text style={styles.settingLabel}>Częstotliwość sprawdzania</Text>
                   <View style={styles.intervalOptionsRow}>
@@ -382,7 +571,8 @@ export default function SettingsScreen() {
                         key={opt.val}
                         style={[
                           styles.intervalChip,
-                          syncSettings.intervalMinutes === opt.val && styles.intervalChipActive,
+                          syncSettings.intervalMinutes === opt.val &&
+                            styles.intervalChipActive,
                         ]}
                         onPress={() => handleChangeInterval(opt.val)}>
                         <Text
@@ -400,10 +590,9 @@ export default function SettingsScreen() {
 
                 <View style={styles.divider} />
 
-                {/* Smart Hours Toggle */}
                 <View style={styles.switchRow}>
                   <View style={styles.switchTextCol}>
-                    <Text style={styles.switchTitle}>Tryb szkolny (Smart Hours)</Text>
+                    <Text style={styles.switchTitle}>Smart Hours</Text>
                     <Text style={styles.switchDesc}>
                       Sprawdza tylko w dni nauki (Pn–Pt, 07:30–18:00), oszczędzając baterię w nocy i w weekendy
                     </Text>
@@ -415,31 +604,94 @@ export default function SettingsScreen() {
                     trackColor={{ false: '#334155', true: '#38bdf840' }}
                   />
                 </View>
-
-                <View style={styles.divider} />
-
-                {/* Test Notification Button */}
-                <TouchableOpacity
-                  style={styles.actionRow}
-                  onPress={handleSendTestNotification}>
-                  <Ionicons name="notifications-outline" size={20} color="#38bdf8" />
-                  <Text style={styles.actionText}>Wyślij testowe powiadomienie</Text>
-                  <Ionicons name="chevron-forward" size={18} color="#64748b" />
-                </TouchableOpacity>
               </>
             )}
           </View>
         </View>
 
-        {/* Privacy & App Info */}
+        {/* Data & Files (Merged Download Folder + Cache) */}
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>Dane i pliki</Text>
+
+          <View style={styles.card}>
+            <View style={styles.actionRow}>
+              <TouchableOpacity
+                style={styles.folderMainTap}
+                activeOpacity={0.8}
+                onPress={handleChooseDownloadFolder}>
+                <Ionicons name="folder-open-outline" size={20} color="#38bdf8" />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actionTitle}>Folder zapisu załączników</Text>
+                  <Text style={styles.actionSubText} numberOfLines={1}>
+                    {formatDownloadFolderLabel(downloadFolderUri)}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+              {downloadFolderUri ? (
+                <TouchableOpacity
+                  onPress={handleResetDownloadFolder}
+                  style={styles.inlineResetPill}>
+                  <Text style={styles.inlineResetPillText}>Resetuj</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity onPress={handleChooseDownloadFolder} hitSlop={8}>
+                  <Ionicons name="chevron-forward" size={18} color="#64748b" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <View style={styles.divider} />
+
+            <TouchableOpacity
+              style={styles.actionRow}
+              disabled={clearingCache}
+              onPress={handleClearCache}>
+              {clearingCache ? (
+                <ActivityIndicator size="small" color="#f59e0b" />
+              ) : (
+                <Ionicons name="trash-outline" size={20} color="#f59e0b" />
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.actionTitle}>
+                  {clearingCache
+                    ? 'Synchronizowanie danych...'
+                    : 'Wyczyść pamięć podręczną'}
+                </Text>
+                <Text style={styles.actionSubText}>
+                  Pobiera od nowa plan, oceny i wiadomości z Librusa
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#64748b" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* App Info & Updates */}
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>O aplikacji Ligmus</Text>
 
           <View style={styles.card}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Wersja</Text>
-              <Text style={styles.infoValue}>v0.5.5-alpha</Text>
+              <Text style={styles.infoValue}>{formatVersionTag(APP_VERSION)}</Text>
             </View>
+
+            <View style={styles.divider} />
+
+            <TouchableOpacity
+              style={styles.actionRow}
+              disabled={checkingUpdate}
+              onPress={handleCheckForUpdates}
+              onLongPress={__DEV__ ? handlePreviewUpdateModal : undefined}
+              delayLongPress={500}>
+              {checkingUpdate ? (
+                <ActivityIndicator size="small" color="#38bdf8" />
+              ) : (
+                <Ionicons name="cloud-download-outline" size={20} color="#38bdf8" />
+              )}
+              <Text style={styles.actionText}>Sprawdź aktualizacje</Text>
+              <Ionicons name="chevron-forward" size={18} color="#64748b" />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -449,6 +701,13 @@ export default function SettingsScreen() {
           <Text style={styles.logoutButtonText}>Wyloguj się z Librusa</Text>
         </TouchableOpacity>
       </ScrollView>
+
+      <UpdateModal
+        visible={Boolean(updateModalInfo)}
+        updateInfo={updateModalInfo}
+        onClose={() => setUpdateModalInfo(null)}
+      />
+      <ToastBanner message={toastMessage} onHide={() => setToastMessage(null)} />
     </SafeAreaView>
   );
 }
@@ -461,7 +720,7 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: 18,
     paddingTop: 12,
-    paddingBottom: 8,
+    paddingBottom: 6,
   },
   headerTitle: {
     fontSize: 24,
@@ -470,13 +729,13 @@ const styles = StyleSheet.create({
   },
   container: {
     padding: 18,
-    gap: 20,
+    gap: 18,
     paddingBottom: 40,
   },
   card: {
     backgroundColor: '#1e293b',
     borderRadius: 16,
-    padding: 16,
+    padding: 15,
     borderWidth: 1,
     borderColor: '#334155',
   },
@@ -485,53 +744,123 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   avatarCircle: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     backgroundColor: '#3b82f6',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 14,
+    marginRight: 13,
   },
   avatarLetter: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
     color: '#ffffff',
   },
   profileInfo: {
     flex: 1,
   },
+  profileTopLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
   studentName: {
-    fontSize: 18,
+    flex: 1,
+    fontSize: 17,
     fontWeight: '700',
     color: '#f8fafc',
   },
-  studentClass: {
-    fontSize: 13,
-    color: '#38bdf8',
-    marginTop: 2,
-    fontWeight: '600',
+  schoolYearBadge: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
   },
-  studentMeta: {
-    fontSize: 12,
+  schoolYearBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
     color: '#94a3b8',
-    marginTop: 2,
+  },
+  studentClass: {
+    fontSize: 12.5,
+    color: '#38bdf8',
+    marginTop: 3,
+    fontWeight: '600',
   },
   section: {
     gap: 8,
   },
   sectionHeader: {
-    fontSize: 13,
+    fontSize: 12.5,
     fontWeight: '700',
     color: '#94a3b8',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginLeft: 4,
   },
-  templateHint: {
-    fontSize: 12,
+  presetBarContainer: {
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 4,
+  },
+  presetTabsScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  presetTab: {
+    paddingHorizontal: 13,
+    paddingVertical: 7,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  presetTabActive: {
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
+    borderColor: '#38bdf8',
+  },
+  presetTabText: {
+    fontSize: 12.5,
+    fontWeight: '600',
     color: '#94a3b8',
-    lineHeight: 17,
+  },
+  presetTabTextActive: {
+    color: '#f8fafc',
+    fontWeight: '700',
+  },
+  presetAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 9,
+  },
+  presetAddBtnText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#38bdf8',
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  deletePresetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  deletePresetText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#ef4444',
   },
   inputGroup: {
     gap: 5,
@@ -552,13 +881,28 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   textInputMultiline: {
-    minHeight: 58,
+    minHeight: 54,
     textAlignVertical: 'top',
+  },
+  advancedToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  advancedToggleText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: '#94a3b8',
+  },
+  advancedFieldsWrap: {
+    gap: 10,
+    paddingTop: 2,
   },
   templateButtonsRow: {
     flexDirection: 'row',
     gap: 10,
-    marginTop: 4,
+    marginTop: 2,
   },
   resetTemplateBtn: {
     paddingHorizontal: 14,
@@ -593,13 +937,24 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: '#334155',
-    marginVertical: 12,
+    marginVertical: 11,
   },
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingVertical: 4,
+    paddingVertical: 3,
+  },
+  folderMainTap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  actionTitle: {
+    fontSize: 14,
+    color: '#f8fafc',
+    fontWeight: '600',
   },
   actionText: {
     flex: 1,
@@ -608,21 +963,34 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   actionSubText: {
-    fontSize: 11,
+    fontSize: 11.5,
     color: '#94a3b8',
     marginTop: 2,
+  },
+  inlineResetPill: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  inlineResetPillText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#cbd5e1',
   },
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingVertical: 4,
+    paddingVertical: 3,
   },
   infoLabel: {
-    fontSize: 13,
+    fontSize: 13.5,
     color: '#94a3b8',
   },
   infoValue: {
-    fontSize: 13,
+    fontSize: 13.5,
     fontWeight: '600',
     color: '#f8fafc',
   },
@@ -636,7 +1004,7 @@ const styles = StyleSheet.create({
     borderColor: '#ef444440',
     paddingVertical: 14,
     borderRadius: 14,
-    marginTop: 6,
+    marginTop: 4,
   },
   logoutButtonText: {
     color: '#ef4444',
@@ -700,32 +1068,19 @@ const styles = StyleSheet.create({
   },
   expoGoBanner: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     backgroundColor: '#0369a120',
     borderWidth: 1,
     borderColor: '#38bdf840',
-    borderRadius: 12,
-    padding: 12,
-    gap: 10,
-    marginBottom: 10,
-  },
-  expoGoBannerTextCol: {
-    flex: 1,
-    gap: 2,
-  },
-  expoGoBannerTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#38bdf8',
+    borderRadius: 11,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    gap: 8,
   },
   expoGoBannerDesc: {
-    fontSize: 12,
+    flex: 1,
+    fontSize: 11.5,
     color: '#cbd5e1',
-    lineHeight: 16,
-  },
-  expoGoCode: {
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    color: '#38bdf8',
-    fontWeight: '600',
+    lineHeight: 15,
   },
 });

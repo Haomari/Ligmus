@@ -31,7 +31,6 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
   onRefresh,
   onPressLesson,
 }) => {
-  console.log(`[TimeGrid render] ${day.dayName} (${day.date}), lessons: ${day.lessons?.length ?? 0}`);
   const scrollRef = useRef<ScrollView>(null);
   const didAutoScrollRef = useRef(false);
 

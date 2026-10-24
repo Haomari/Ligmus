@@ -1,9 +1,10 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
   RefreshControl,
 } from 'react-native';
@@ -11,8 +12,8 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
-import { getGradeColor } from '@/components/grade-details-modal';
-import { DaySchedule, TimetableLesson } from '@/types/librus';
+import { getGradeColor, GradeDetailsModal } from '@/components/grade-details-modal';
+import { DaySchedule, Grade, TimetableLesson } from '@/types/librus';
 import {
   getInitialSchoolDate,
   getMonday,
@@ -20,10 +21,13 @@ import {
   toISODate,
 } from '@/utils/dates';
 import { getAllCachedWeeks } from '@/services/fileCache';
+import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
   const {
     student,
     grades,
@@ -106,12 +110,40 @@ export default function HomeScreen() {
     return { nextLesson: null, nextLessonDayLabel: null };
   }, [weeks, timetable, isRefreshing]);
 
+  const [gradeModal, setGradeModal] = useState<{
+    visible: boolean;
+    subjectName: string;
+    grades: Grade[];
+    initialIndex: number;
+  }>({
+    visible: false,
+    subjectName: '',
+    grades: [],
+    initialIndex: 0,
+  });
+
+  const openRecentGradeModal = (subjectName: string, gradeId: string, semester: 1 | 2) => {
+    const subj = grades.find((s) => s.subjectName === subjectName);
+    if (!subj) return;
+    const semGrades = subj.grades
+      .filter((gr) => gr.semester === semester)
+      .sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0));
+    const idx = Math.max(0, semGrades.findIndex((gr) => gr.id === gradeId));
+    setGradeModal({
+      visible: true,
+      subjectName,
+      grades: semGrades.length > 0 ? semGrades : subj.grades,
+      initialIndex: idx,
+    });
+  };
+
   const attendanceColor = useMemo(() => {
     const pct = attendanceStats?.percent;
-    if (pct == null) return '#3b82f6';
+    if (pct == null) return '#64748b';
+    if (pct < 50) return '#ef4444';
+    if (pct < 60) return '#f59e0b';
     if (pct >= 85) return '#10b981';
-    if (pct >= 70) return '#f59e0b';
-    return '#ef4444';
+    return '#38bdf8';
   }, [attendanceStats?.percent]);
 
   // Flatten and sort all grades by date descending to show recent
@@ -135,28 +167,20 @@ export default function HomeScreen() {
             tintColor="#3b82f6"
           />
         }>
-        {/* Header */}
+        {/* Compact Header with Lucky Number Pill */}
         <View style={styles.header}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.greeting}>Cześć, {student?.name ? student.name.split(' ')[0] : 'Uczniu'}! 👋</Text>
-            <Text style={styles.subGreeting}>
-              {student?.name ? `${student.name} • ` : ''}{student?.classGroup || 'Librus Synergia'}{student?.studentNumber ? ` • Nr ${student.studentNumber}` : ''}
+          <View style={styles.headerInfoCol}>
+            <Text style={styles.greeting} numberOfLines={1}>
+              {student?.name || 'Uczeń'}
+            </Text>
+            <Text style={styles.subGreeting} numberOfLines={1}>
+              {student?.classGroup || 'Librus Synergia'}
+              {student?.studentNumber ? ` • Nr ${student.studentNumber}` : ''}
             </Text>
           </View>
-        </View>
-
-        {/* Lucky Number Card */}
-        <View style={[styles.card, styles.luckyCard]}>
-          <View style={styles.luckyRow}>
-            <View style={styles.luckyIconContainer}>
-              <Text style={styles.luckyEmoji}>🍀</Text>
-            </View>
-            <View style={styles.luckyTextCol}>
-              <Text style={styles.luckyTitle}>Szczęśliwy Numerek</Text>
-            </View>
-            <View style={styles.luckyNumberBadge}>
-              <Text style={styles.luckyNumberValue}>{student?.luckyNumber ?? '--'}</Text>
-            </View>
+          <View style={styles.luckyPill}>
+            <Text style={styles.luckyPillEmoji}>🍀</Text>
+            <Text style={styles.luckyPillValue}>{student?.luckyNumber ?? '--'}</Text>
           </View>
         </View>
 
@@ -171,9 +195,6 @@ export default function HomeScreen() {
                 <Ionicons name="pie-chart-outline" size={18} color={attendanceColor} />
                 <Text style={styles.attendanceTitle}>Frekwencja</Text>
               </View>
-              <Text style={styles.attendanceSub}>
-                Obecności i spóźnienia w bieżącym roku
-              </Text>
             </View>
             <View
               style={[
@@ -287,9 +308,21 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.gradesList}>
+          <View
+            style={[
+              styles.gradesList,
+              isWideScreen && styles.gradesListWide,
+            ]}>
             {allGrades.map((g) => (
-              <View key={g.id} style={[styles.card, styles.gradeCard]}>
+              <TouchableOpacity
+                key={g.id}
+                activeOpacity={0.8}
+                onPress={() => openRecentGradeModal(g.subjectName, g.id, g.semester)}
+                style={[
+                  styles.card,
+                  styles.gradeCard,
+                  isWideScreen && styles.gradeCardWide,
+                ]}>
                 <View
                   style={[
                     styles.gradeBadge,
@@ -304,19 +337,38 @@ export default function HomeScreen() {
                   </Text>
                 </View>
                 <View style={styles.gradeInfo}>
-                  <Text style={styles.gradeSubject}>{g.subjectName}</Text>
-                  <Text style={styles.gradeMeta}>
-                    {g.category} (waga {g.weight})
-                    {g.correction ? ` • popr. z ${g.correction.originalValue}` : ''}
-                    {g.comment ? ` • ${g.comment}` : ''}
-                  </Text>
+                  <View style={styles.gradeTopRow}>
+                    <Text style={styles.gradeSubject} numberOfLines={1}>
+                      {g.subjectName}
+                    </Text>
+                    <Text style={styles.gradeDate}>{g.date.slice(5)}</Text>
+                  </View>
+                  <View style={styles.gradeBottomRow}>
+                    <Text style={styles.gradeMeta} numberOfLines={1}>
+                      {g.category}
+                      {g.correction ? ` • popr. z ${g.correction.originalValue}` : ''}
+                    </Text>
+                    {g.teacher ? (
+                      <Text style={styles.gradeTeacher} numberOfLines={1}>
+                        {g.teacher}
+                      </Text>
+                    ) : null}
+                  </View>
                 </View>
-                <Text style={styles.gradeDate}>{g.date.slice(5)}</Text>
-              </View>
+              </TouchableOpacity>
             ))}
           </View>
         </View>
       </ScrollView>
+
+      <GradeDetailsModal
+        key={`${gradeModal.subjectName}-${gradeModal.grades.length}-${gradeModal.initialIndex}`}
+        visible={gradeModal.visible}
+        subjectName={gradeModal.subjectName}
+        grades={gradeModal.grades}
+        initialIndex={gradeModal.initialIndex}
+        onClose={() => setGradeModal((prev) => ({ ...prev, visible: false }))}
+      />
     </SafeAreaView>
   );
 }
@@ -335,11 +387,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 12,
     marginBottom: 4,
   },
+  headerInfoCol: {
+    flex: 1,
+  },
   greeting: {
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 21,
+    fontWeight: '800',
     color: '#f8fafc',
   },
   subGreeting: {
@@ -347,12 +403,25 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginTop: 2,
   },
-  settingsIconButton: {
-    padding: 8,
-    borderRadius: 12,
-    backgroundColor: '#1e293b',
+  luckyPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#064e3b',
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#059669',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 14,
+    flexShrink: 0,
+  },
+  luckyPillEmoji: {
+    fontSize: 16,
+  },
+  luckyPillValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#ecfdf5',
   },
   card: {
     backgroundColor: '#1e293b',
@@ -360,52 +429,6 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: '#334155',
-  },
-  luckyCard: {
-    backgroundColor: '#064e3b',
-    borderColor: '#059669',
-  },
-  luckyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  luckyIconContainer: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#047857',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  luckyEmoji: {
-    fontSize: 24,
-  },
-  luckyTextCol: {
-    flex: 1,
-  },
-  luckyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#ecfdf5',
-  },
-  luckySubtitle: {
-    fontSize: 12,
-    color: '#a7f3d0',
-    marginTop: 2,
-  },
-  luckyNumberBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#10b981',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  luckyNumberValue: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#ffffff',
   },
   attendanceCard: {
     gap: 12,
@@ -561,11 +584,20 @@ const styles = StyleSheet.create({
   gradesList: {
     gap: 8,
   },
+  gradesListWide: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
   gradeCard: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 12,
     paddingHorizontal: 14,
+  },
+  gradeCardWide: {
+    width: '48.8%',
   },
   gradeBadge: {
     width: 38,
@@ -581,21 +613,43 @@ const styles = StyleSheet.create({
   },
   gradeInfo: {
     flex: 1,
+    gap: 3,
+  },
+  gradeTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  gradeBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
   },
   gradeSubject: {
+    flex: 1,
     fontSize: 15,
     fontWeight: '700',
     color: '#f8fafc',
   },
   gradeMeta: {
+    flex: 1,
     fontSize: 12,
     color: '#94a3b8',
-    marginTop: 2,
+  },
+  gradeTeacher: {
+    flexShrink: 1,
+    maxWidth: '48%',
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '500',
+    textAlign: 'right',
   },
   gradeDate: {
     fontSize: 11,
     color: '#64748b',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   infoCard: {
     flexDirection: 'row',

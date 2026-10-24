@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import Constants, { AppOwnership, ExecutionEnvironment } from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 import type * as NotificationsType from 'expo-notifications';
@@ -7,16 +7,24 @@ import type * as TaskManagerType from 'expo-task-manager';
 import {
   AttendanceMark,
   Grade,
+  LibrusMessageSummary,
   SubjectGrades,
   TimetableLesson,
   WeekSchedule,
 } from '@/types/librus';
 import { addDays, getMonday, toISODate } from '@/utils/dates';
-import { getCachedAttendanceMarks, getCachedMessages, getCachedWeek } from './fileCache';
+import {
+  getCachedAttendanceMarks,
+  getCachedMessages,
+  getCachedWeek,
+  getNotifiedSyncState,
+  saveNotifiedSyncState,
+} from './fileCache';
 import { librusClient } from './librusClient';
 
 export const BACKGROUND_SYNC_TASK = 'LIGMUS_BACKGROUND_SYNC_TASK';
 const SETTINGS_KEY = 'ligmus_sync_settings';
+const LAST_REGISTERED_INTERVAL_KEY = 'ligmus_sync_registered_interval';
 const GRADES_CACHE_KEY = 'ligmus_grades_cache';
 
 /**
@@ -45,10 +53,14 @@ export enum BackgroundSyncResult {
   Failed = 3,
 }
 
+let isSmartSyncRunning = false;
+const handledNotificationIds = new Set<string>();
+
 // Lazy native module loaders to prevent crashes in Expo Go
 function getNotifications(): typeof NotificationsType | null {
   if (isExpoGo) return null;
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('expo-notifications');
   } catch (err) {
     console.warn('[SmartSync] expo-notifications unavailable in current runtime:', err);
@@ -59,6 +71,7 @@ function getNotifications(): typeof NotificationsType | null {
 function getTaskManager(): typeof TaskManagerType | null {
   if (isExpoGo) return null;
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('expo-task-manager');
   } catch (err) {
     console.warn('[SmartSync] expo-task-manager unavailable in current runtime:', err);
@@ -69,6 +82,7 @@ function getTaskManager(): typeof TaskManagerType | null {
 function getBackgroundFetch(): typeof BackgroundFetchType | null {
   if (isExpoGo) return null;
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('expo-background-fetch');
   } catch (err) {
     console.warn('[SmartSync] expo-background-fetch unavailable in current runtime:', err);
@@ -146,7 +160,7 @@ export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
   try {
     await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(settings));
     if (settings.enabled) {
-      await registerBackgroundSyncAsync(settings.intervalMinutes);
+      await registerBackgroundSyncAsync(settings.intervalMinutes, true);
     } else {
       await unregisterBackgroundSyncAsync();
     }
@@ -156,9 +170,14 @@ export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
 }
 
 /**
- * Register background fetch task with the specified interval
+ * Register background fetch task with the specified interval.
+ * Avoids unregistering an already-registered task at the same interval unless `forceReplace` is true,
+ * preventing Android WorkManager from resetting its periodic timer on every app launch.
  */
-export async function registerBackgroundSyncAsync(intervalMinutes: number = 30): Promise<boolean> {
+export async function registerBackgroundSyncAsync(
+  intervalMinutes: number = 30,
+  forceReplace: boolean = false
+): Promise<boolean> {
   if (isExpoGo) {
     return false;
   }
@@ -167,21 +186,47 @@ export async function registerBackgroundSyncAsync(intervalMinutes: number = 30):
     const BackgroundFetch = getBackgroundFetch();
     if (!TaskManager || !BackgroundFetch) return false;
 
+    const clampedMinutes = Math.max(intervalMinutes, 15);
     const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_SYNC_TASK);
+    const prevIntervalRaw = await SecureStore.getItemAsync(LAST_REGISTERED_INTERVAL_KEY);
+    const prevInterval = prevIntervalRaw ? Number(prevIntervalRaw) : null;
+
+    if (isRegistered && !forceReplace && prevInterval === clampedMinutes) {
+      return true;
+    }
+
     if (isRegistered) {
       await BackgroundFetch.unregisterTaskAsync(BACKGROUND_SYNC_TASK);
     }
 
-    const intervalSeconds = Math.max(intervalMinutes * 60, 15 * 60); // Android minimum is 15 minutes
     await BackgroundFetch.registerTaskAsync(BACKGROUND_SYNC_TASK, {
-      minimumInterval: intervalSeconds,
+      minimumInterval: clampedMinutes * 60,
       stopOnTerminate: false,
       startOnBoot: true,
     });
+    await SecureStore.setItemAsync(LAST_REGISTERED_INTERVAL_KEY, String(clampedMinutes));
     return true;
   } catch (error) {
     console.warn('[SmartSync] BackgroundFetch registration warning:', error);
     return false;
+  }
+}
+
+/**
+ * Synchronize OS BackgroundFetch registration with the user's saved SyncSettings on app launch.
+ */
+export async function syncBackgroundRegistrationWithSettings(): Promise<void> {
+  if (isExpoGo) return;
+  try {
+    await setupNotificationChannelAsync();
+    const settings = await getSyncSettings();
+    if (!settings.enabled) {
+      await unregisterBackgroundSyncAsync();
+      return;
+    }
+    await registerBackgroundSyncAsync(settings.intervalMinutes, false);
+  } catch (err) {
+    console.warn('[SmartSync] syncBackgroundRegistrationWithSettings warning:', err);
   }
 }
 
@@ -199,6 +244,7 @@ export async function unregisterBackgroundSyncAsync(): Promise<void> {
     if (isRegistered) {
       await BackgroundFetch.unregisterTaskAsync(BACKGROUND_SYNC_TASK);
     }
+    await SecureStore.deleteItemAsync(LAST_REGISTERED_INTERVAL_KEY);
   } catch {}
 }
 
@@ -226,43 +272,51 @@ export async function requestNotificationPermissions(): Promise<boolean> {
 }
 
 /**
- * Trigger an instant test notification so the user can verify notifications work
+ * Check if the app was launched from a killed state by tapping a notification.
  */
-export async function sendTestNotification(): Promise<boolean> {
-  if (isExpoGo) {
-    return false;
-  }
+export async function getInitialNotificationUrlAsync(): Promise<string | null> {
+  if (isExpoGo) return null;
   try {
     const Notifications = getNotifications();
-    if (!Notifications) return false;
+    if (!Notifications) return null;
 
-    await setupNotificationChannelAsync();
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: 'Nowa ocena: Matematyka - 5',
-        body: 'kartkówka (waga 2) • pochodna i styczna',
-        data: { url: '/grades' },
-        sound: 'default',
-      },
-      trigger: Platform.OS === 'android' ? { channelId: 'librus-grades' } : null,
-    });
-    return true;
-  } catch (e) {
-    console.warn('[SmartSync] sendTestNotification warning:', e);
-    return false;
+    const response = await Notifications.getLastNotificationResponseAsync();
+    if (!response) return null;
+
+    const id = response.notification.request.identifier;
+    if (id && handledNotificationIds.has(id)) {
+      return null;
+    }
+    if (id) {
+      handledNotificationIds.add(id);
+    }
+
+    const url = response.notification.request.content.data?.url;
+    if (typeof Notifications.clearLastNotificationResponseAsync === 'function') {
+      await Notifications.clearLastNotificationResponseAsync().catch(() => {});
+    }
+    return typeof url === 'string' && url ? url : null;
+  } catch {
+    return null;
   }
 }
 
 /**
- * Add listener for when a user clicks on a notification
+ * Add listener for when a user clicks on a notification while app is in memory
  */
-export function addNotificationResponseListener(callback: (url: string) => void): (() => void) | null {
+export function addNotificationResponseListener(
+  callback: (url: string) => void
+): (() => void) | null {
   if (isExpoGo) return null;
   try {
     const Notifications = getNotifications();
     if (!Notifications) return null;
 
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const id = response.notification.request.identifier;
+      if (id) {
+        handledNotificationIds.add(id);
+      }
       const url = response.notification.request.content.data?.url;
       if (url && typeof url === 'string') {
         callback(url);
@@ -281,12 +335,14 @@ export function addNotificationResponseListener(callback: (url: string) => void)
 }
 
 /**
- * Core background synchronization function (grades + timetable changes + attendance)
+ * Core background synchronization function (messages + grades + timetable changes + attendance)
  */
 export async function executeSmartSync(): Promise<number> {
-  if (isExpoGo) {
+  if (isExpoGo || isSmartSyncRunning) {
     return BackgroundSyncResult.NoData;
   }
+
+  isSmartSyncRunning = true;
   try {
     const settings = await getSyncSettings();
     if (!settings.enabled) {
@@ -303,13 +359,20 @@ export async function executeSmartSync(): Promise<number> {
     }
 
     const Notifications = getNotifications();
-    if (Notifications) {
+    const shouldNotifyUser = Boolean(Notifications) && AppState.currentState !== 'active';
+    if (shouldNotifyUser) {
       await setupNotificationChannelAsync();
     }
 
-    let foundNewData = false;
+    // Snapshot existing caches and persistent deduplication state BEFORE scraping live pages
+    const syncState = getNotifiedSyncState();
+    const notifiedMessageSet = new Set<string>(syncState.notifiedMessageIds);
+    const notifiedGradeSet = new Set<string>(syncState.notifiedGradeIds);
+    const notifiedAttendanceSet = new Set<string>(syncState.notifiedAttendanceIds);
+    const notifiedTimetableSet = new Set<string>(syncState.notifiedTimetableKeys);
 
-    // --- 1. GRADES DIFF ---
+    const oldInbox: LibrusMessageSummary[] = getCachedMessages('inbox') ?? [];
+
     let cachedGrades: SubjectGrades[] = [];
     const cachedRaw = await SecureStore.getItemAsync(GRADES_CACHE_KEY);
     if (cachedRaw) {
@@ -317,7 +380,6 @@ export async function executeSmartSync(): Promise<number> {
         cachedGrades = JSON.parse(cachedRaw);
       } catch {}
     }
-
     const existingGradeIds = new Set<string>();
     for (const sub of cachedGrades) {
       for (const g of sub.grades) {
@@ -325,23 +387,158 @@ export async function executeSmartSync(): Promise<number> {
       }
     }
 
-    const freshSubjects = await librusClient.getGrades();
-    if (freshSubjects && freshSubjects.length > 0) {
-      if (existingGradeIds.size === 0) {
-        foundNewData = true;
+    const oldMarks: AttendanceMark[] = getCachedAttendanceMarks() ?? [];
+    const oldMarkIds = new Set<string>(oldMarks.map((m) => m.id));
+
+    const now = new Date();
+    const todayIso = toISODate(now);
+    const tomorrowIso = toISODate(addDays(now, 1));
+    const todayWeekStart = toISODate(getMonday(now));
+    const tomorrowWeekStart = toISODate(getMonday(addDays(now, 1)));
+
+    const oldTodayWeek: WeekSchedule | null = getCachedWeek(todayWeekStart);
+    const oldTomorrowWeek: WeekSchedule | null =
+      tomorrowWeekStart === todayWeekStart ? oldTodayWeek : getCachedWeek(tomorrowWeekStart);
+
+    const oldLessonsById = new Map<string, TimetableLesson>();
+    const collectOldLessons = (wk: WeekSchedule | null, dateIso: string) => {
+      const day = wk?.days.find((d) => d.date === dateIso);
+      if (!day) return;
+      for (const l of day.lessons) {
+        oldLessonsById.set(`${dateIso}:${l.id}`, l);
+      }
+    };
+    collectOldLessons(oldTodayWeek, todayIso);
+    collectOldLessons(oldTomorrowWeek, tomorrowIso);
+
+    let foundNewData = false;
+
+    // --- 1. MESSAGES DIFF (Top priority + warms/refreshes Librus session once before parallel calls) ---
+    try {
+      if (!syncState.seededMessages && oldInbox.length > 0) {
+        for (const m of oldInbox) {
+          notifiedMessageSet.add(m.id);
+          const numId = Number(m.id);
+          if (Number.isFinite(numId) && numId > syncState.maxSeenMessageId) {
+            syncState.maxSeenMessageId = numId;
+          }
+        }
+        syncState.seededMessages = true;
+      }
+
+      const freshInbox = await librusClient.getMessages('inbox');
+      if (freshInbox && freshInbox.length > 0) {
+        if (!syncState.seededMessages) {
+          // Very first run with empty cache: seed silently without spamming old unread messages
+          for (const m of freshInbox) {
+            notifiedMessageSet.add(m.id);
+            const numId = Number(m.id);
+            if (Number.isFinite(numId) && numId > syncState.maxSeenMessageId) {
+              syncState.maxSeenMessageId = numId;
+            }
+          }
+          syncState.seededMessages = true;
+        } else {
+          const prevMaxId = syncState.maxSeenMessageId;
+          const newUnread = freshInbox.filter((m) => {
+            if (!m.isUnread || !m.id || notifiedMessageSet.has(m.id)) {
+              return false;
+            }
+            const numId = Number(m.id);
+            // Guard against older unread messages shifting onto Page 1 when messages are deleted
+            if (Number.isFinite(numId) && prevMaxId > 0 && numId <= prevMaxId) {
+              return false;
+            }
+            return true;
+          });
+
+          for (const m of freshInbox) {
+            notifiedMessageSet.add(m.id);
+            const numId = Number(m.id);
+            if (Number.isFinite(numId) && numId > syncState.maxSeenMessageId) {
+              syncState.maxSeenMessageId = numId;
+            }
+          }
+
+          if (newUnread.length > 0) {
+            foundNewData = true;
+            if (shouldNotifyUser && Notifications) {
+              if (newUnread.length <= 2) {
+                for (const msg of newUnread) {
+                  await Notifications.scheduleNotificationAsync({
+                    content: {
+                      title: `Nowa wiadomość: ${msg.sender}`,
+                      body: msg.subject,
+                      data: { url: '/messages' },
+                      sound: 'default',
+                    },
+                    trigger: Platform.OS === 'android' ? { channelId: 'librus-messages' } : null,
+                  });
+                }
+              } else {
+                const senders = newUnread
+                  .slice(0, 3)
+                  .map((m) => m.sender)
+                  .join(', ');
+                const extra = newUnread.length > 3 ? ` i ${newUnread.length - 3} więcej` : '';
+                await Notifications.scheduleNotificationAsync({
+                  content: {
+                    title: `Nowe wiadomości (${newUnread.length})`,
+                    body: `Od: ${senders}${extra}`,
+                    data: { url: '/messages' },
+                    sound: 'default',
+                  },
+                  trigger: Platform.OS === 'android' ? { channelId: 'librus-messages' } : null,
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (msgErr) {
+      console.warn('[SmartSync] Messages check warning:', msgErr);
+    }
+
+    // --- 2. PARALLEL GRADES + LIGHTWEIGHT ATTENDANCE + TIMETABLE DIFF ---
+    const [gradesSettled, attSettled, todayWeekSettled, tomorrowWeekSettled] =
+      await Promise.allSettled([
+        librusClient.getGrades(),
+        librusClient.getAttendanceAndRealizations({ includeRealizations: false }),
+        librusClient.getWeek(todayWeekStart),
+        tomorrowWeekStart === todayWeekStart
+          ? Promise.resolve<WeekSchedule | null>(null)
+          : librusClient.getWeek(tomorrowWeekStart),
+      ]);
+
+    // 2A. Grades diff
+    if (gradesSettled.status === 'fulfilled' && gradesSettled.value.length > 0) {
+      const freshSubjects = gradesSettled.value;
+      if (!syncState.seededGrades && existingGradeIds.size > 0) {
+        existingGradeIds.forEach((id) => notifiedGradeSet.add(id));
+        syncState.seededGrades = true;
+      }
+
+      if (!syncState.seededGrades) {
+        for (const sub of freshSubjects) {
+          for (const g of sub.grades) {
+            notifiedGradeSet.add(g.id);
+          }
+        }
+        syncState.seededGrades = true;
       } else {
         const newGrades: { subjectName: string; grade: Grade }[] = [];
         for (const sub of freshSubjects) {
           for (const g of sub.grades) {
-            if (!existingGradeIds.has(g.id)) {
+            if (!existingGradeIds.has(g.id) && !notifiedGradeSet.has(g.id)) {
               newGrades.push({ subjectName: sub.subjectName, grade: g });
             }
+            notifiedGradeSet.add(g.id);
           }
         }
 
         if (newGrades.length > 0) {
           foundNewData = true;
-          if (Notifications) {
+          if (shouldNotifyUser && Notifications) {
             if (newGrades.length === 1) {
               const { subjectName, grade } = newGrades[0];
               await Notifications.scheduleNotificationAsync({
@@ -375,64 +572,60 @@ export async function executeSmartSync(): Promise<number> {
       }
     }
 
-    // --- 2. ATTENDANCE & TIMETABLE DIFF ---
-    const oldMarks: AttendanceMark[] = getCachedAttendanceMarks() ?? [];
-    const oldMarkIds = new Set<string>(oldMarks.map((m) => m.id));
-
-    const now = new Date();
-    const todayIso = toISODate(now);
-    const tomorrowIso = toISODate(addDays(now, 1));
-    const todayWeekStart = toISODate(getMonday(now));
-    const tomorrowWeekStart = toISODate(getMonday(addDays(now, 1)));
-
-    const oldTodayWeek: WeekSchedule | null = getCachedWeek(todayWeekStart);
-    const oldTomorrowWeek: WeekSchedule | null =
-      tomorrowWeekStart === todayWeekStart
-        ? oldTodayWeek
-        : getCachedWeek(tomorrowWeekStart);
-
-    const oldLessonsById = new Map<string, TimetableLesson>();
-    const collectOldLessons = (wk: WeekSchedule | null, dateIso: string) => {
-      const day = wk?.days.find((d) => d.date === dateIso);
-      if (!day) return;
-      for (const l of day.lessons) {
-        oldLessonsById.set(l.id, l);
+    // 2B. Attendance diff
+    if (attSettled.status === 'fulfilled' && attSettled.value.marks.length > 0) {
+      const freshMarks = attSettled.value.marks;
+      if (!syncState.seededAttendance && oldMarkIds.size > 0) {
+        oldMarkIds.forEach((id) => notifiedAttendanceSet.add(id));
+        syncState.seededAttendance = true;
       }
-    };
-    collectOldLessons(oldTodayWeek, todayIso);
-    collectOldLessons(oldTomorrowWeek, tomorrowIso);
 
-    const freshAtt = await librusClient.getAttendanceAndRealizations();
-    if (freshAtt && oldMarkIds.size > 0) {
-      const newAlertMarks = freshAtt.marks.filter(
-        (m) => !oldMarkIds.has(m.id) && (m.kind === 'absent' || m.kind === 'late')
-      );
-      if (newAlertMarks.length > 0) {
-        foundNewData = true;
-        if (Notifications) {
-          for (const mark of newAlertMarks.slice(0, 3)) {
-            const label = mark.kind === 'late' ? 'Spóźnienie' : 'Nieobecność';
-            const subj = mark.subject || 'Zajęcia lekcyjne';
-            const lessonLabel = mark.hourNumber ? `${mark.hourNumber}. lekcja` : '';
-            await Notifications.scheduleNotificationAsync({
-              content: {
-                title: `${label}: ${subj}${lessonLabel ? ` (${lessonLabel})` : ''}`,
-                body: `${mark.name}${mark.date ? ' • ' + mark.date : ''}`,
-                data: { url: '/timetable' },
-                sound: 'default',
-              },
-              trigger: Platform.OS === 'android' ? { channelId: 'librus-timetable' } : null,
-            });
+      if (!syncState.seededAttendance) {
+        for (const m of freshMarks) {
+          notifiedAttendanceSet.add(m.id);
+        }
+        syncState.seededAttendance = true;
+      } else {
+        const newAlertMarks = freshMarks.filter(
+          (m) =>
+            !oldMarkIds.has(m.id) &&
+            !notifiedAttendanceSet.has(m.id) &&
+            (m.kind === 'absent' || m.kind === 'late')
+        );
+        for (const m of freshMarks) {
+          notifiedAttendanceSet.add(m.id);
+        }
+
+        if (newAlertMarks.length > 0) {
+          foundNewData = true;
+          if (shouldNotifyUser && Notifications) {
+            for (const mark of newAlertMarks.slice(0, 3)) {
+              const label = mark.kind === 'late' ? 'Spóźnienie' : 'Nieobecność';
+              const subj = mark.subject || 'Zajęcia lekcyjne';
+              const lessonLabel = mark.hourNumber ? `${mark.hourNumber}. lekcja` : '';
+              await Notifications.scheduleNotificationAsync({
+                content: {
+                  title: `${label}: ${subj}${lessonLabel ? ` (${lessonLabel})` : ''}`,
+                  body: `${mark.name}${mark.date ? ' • ' + mark.date : ''}`,
+                  data: { url: '/timetable' },
+                  sound: 'default',
+                },
+                trigger: Platform.OS === 'android' ? { channelId: 'librus-timetable' } : null,
+              });
+            }
           }
         }
       }
     }
 
-    const freshTodayWeek = await librusClient.getWeek(todayWeekStart);
+    // 2C. Timetable cancellations & substitutions diff
+    const freshTodayWeek = todayWeekSettled.status === 'fulfilled' ? todayWeekSettled.value : null;
     const freshTomorrowWeek =
       tomorrowWeekStart === todayWeekStart
         ? freshTodayWeek
-        : await librusClient.getWeek(tomorrowWeekStart);
+        : tomorrowWeekSettled.status === 'fulfilled'
+          ? tomorrowWeekSettled.value
+          : null;
 
     if (oldLessonsById.size > 0) {
       const checkDayDiffs = async (
@@ -443,12 +636,15 @@ export async function executeSmartSync(): Promise<number> {
         const day = wk?.days.find((d) => d.date === dateIso);
         if (!day) return;
         for (const lesson of day.lessons) {
-          const prev = oldLessonsById.get(lesson.id);
+          const prev = oldLessonsById.get(`${dateIso}:${lesson.id}`);
           if (!prev) continue;
 
           if (!prev.isCancelled && lesson.isCancelled) {
+            const diffKey = `${dateIso}:${lesson.id}:cancelled`;
+            if (notifiedTimetableSet.has(diffKey)) continue;
+            notifiedTimetableSet.add(diffKey);
             foundNewData = true;
-            if (Notifications) {
+            if (shouldNotifyUser && Notifications) {
               await Notifications.scheduleNotificationAsync({
                 content: {
                   title: `Odwołana lekcja: ${lesson.subject} (${dayWord}, ${lesson.hourNumber}. lekcja)`,
@@ -460,10 +656,12 @@ export async function executeSmartSync(): Promise<number> {
               });
             }
           } else if (!prev.isSubstitution && lesson.isSubstitution && !lesson.isCancelled) {
+            const diffKey = `${dateIso}:${lesson.id}:sub:${lesson.changeType || 'sub'}`;
+            if (notifiedTimetableSet.has(diffKey)) continue;
+            notifiedTimetableSet.add(diffKey);
             foundNewData = true;
-            if (Notifications) {
-              const kindTitle =
-                lesson.changeType === 'room' ? 'Zmiana sali' : 'Zastępstwo';
+            if (shouldNotifyUser && Notifications) {
+              const kindTitle = lesson.changeType === 'room' ? 'Zmiana sali' : 'Zastępstwo';
               await Notifications.scheduleNotificationAsync({
                 content: {
                   title: `${kindTitle}: ${lesson.subject} (${dayWord}, ${lesson.hourNumber}. lekcja)`,
@@ -482,34 +680,20 @@ export async function executeSmartSync(): Promise<number> {
       await checkDayDiffs(freshTomorrowWeek, tomorrowIso, 'jutro');
     }
 
-    // --- 3. MESSAGES DIFF ---
-    const oldInbox = getCachedMessages('inbox') ?? [];
-    const oldMessageIds = new Set<string>(oldInbox.map((m) => m.id));
-    const freshInbox = await librusClient.getMessages('inbox');
-    if (freshInbox && oldMessageIds.size > 0) {
-      const newUnread = freshInbox.filter((m) => !oldMessageIds.has(m.id) && m.isUnread);
-      if (newUnread.length > 0) {
-        foundNewData = true;
-        if (Notifications) {
-          for (const msg of newUnread.slice(0, 3)) {
-            await Notifications.scheduleNotificationAsync({
-              content: {
-                title: `Nowa wiadomość: ${msg.sender}`,
-                body: msg.subject,
-                data: { url: '/messages' },
-                sound: 'default',
-              },
-              trigger: Platform.OS === 'android' ? { channelId: 'librus-messages' } : null,
-            });
-          }
-        }
-      }
-    }
+    saveNotifiedSyncState({
+      ...syncState,
+      notifiedMessageIds: Array.from(notifiedMessageSet),
+      notifiedGradeIds: Array.from(notifiedGradeSet),
+      notifiedAttendanceIds: Array.from(notifiedAttendanceSet),
+      notifiedTimetableKeys: Array.from(notifiedTimetableSet),
+    });
 
     return foundNewData ? BackgroundSyncResult.NewData : BackgroundSyncResult.NoData;
   } catch (error) {
     console.error('[SmartSync] Error during background smart sync:', error);
     return BackgroundSyncResult.Failed;
+  } finally {
+    isSmartSyncRunning = false;
   }
 }
 
@@ -524,13 +708,16 @@ export function initBackgroundSync(): void {
     const Notifications = getNotifications();
     if (Notifications) {
       Notifications.setNotificationHandler({
-        handleNotification: async () => ({
-          shouldShowAlert: true,
-          shouldPlaySound: true,
-          shouldSetBadge: true,
-          shouldShowBanner: true,
-          shouldShowList: true,
-        }),
+        handleNotification: async () => {
+          const isForeground = AppState.currentState === 'active';
+          return {
+            shouldShowAlert: !isForeground,
+            shouldPlaySound: !isForeground,
+            shouldSetBadge: !isForeground,
+            shouldShowBanner: !isForeground,
+            shouldShowList: !isForeground,
+          };
+        },
       });
     }
 

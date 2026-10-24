@@ -13,9 +13,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLibrus } from '@/context/LibrusContext';
 import { DaySchedule, TimetableLesson } from '@/types/librus';
 import {
-  POLISH_DAY_NAMES,
-  POLISH_DAY_SHORT,
   addDays,
+  buildEmptyWeekDays,
   formatPolishDayHeader,
   getInitialSchoolDate,
   getMonday,
@@ -28,23 +27,14 @@ import { DayBar } from '@/components/timetable/DayBar';
 import { LessonDetailsModal } from '@/components/lesson-details-modal';
 import { getAllCachedWeeks, weekHasLessons } from '@/services/fileCache';
 import { librusClient } from '@/services/librusClient';
-
-function buildEmptyWeekDays(weekStartIso: string): DaySchedule[] {
-  const mon = parseISODate(weekStartIso);
-  return Array.from({ length: 5 }, (_, idx) => {
-    const d = addDays(mon, idx);
-    return {
-      dayId: idx + 1,
-      dayName: POLISH_DAY_NAMES[idx],
-      shortName: POLISH_DAY_SHORT[idx],
-      date: toISODate(d),
-      lessons: [],
-    };
-  });
-}
+import { RIGHT_RAIL_WIDTH, WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 
 export default function TimetableScreen() {
-  const { width: SCREEN_WIDTH } = useWindowDimensions();
+  const { width: windowWidth } = useWindowDimensions();
+  const SCREEN_WIDTH =
+    windowWidth >= WIDE_LAYOUT_BREAKPOINT
+      ? windowWidth - RIGHT_RAIL_WIDTH
+      : windowWidth;
   const { weeks, loadWeek, isLoading, isRefreshing, refreshData } = useLibrus();
 
   const todayIso = useMemo(() => toISODate(new Date()), [isRefreshing]);
@@ -73,28 +63,21 @@ export default function TimetableScreen() {
     let cancelled = false;
     const week = activeWeekStart;
 
-    console.log(`[TimetableScreen effect] activeWeekStart: ${week}`);
     const currentWeekData = weeksRef.current[week];
     if (currentWeekData && weekHasLessons(currentWeekData)) {
-      console.log(`[TimetableScreen effect] Week ${week} already has lessons in state, skipping fetch.`);
       return;
     }
 
     if (fetchingWeeksRef.current.has(week)) {
-      console.log(`[TimetableScreen effect] Week ${week} is already in-flight, skipping.`);
       return;
     }
 
-    console.log(`[TimetableScreen effect] Fetching week ${week}...`);
     fetchingWeeksRef.current.add(week);
     setIsFetchingWeek(true);
 
     loadWeek(week, false)
-      .then((res) => {
-        console.log(`[TimetableScreen effect] loadWeek(${week}) resolved with total lessons:`, res?.days.reduce((s, d) => s + d.lessons.length, 0) ?? 0);
-      })
       .catch((err) => {
-        console.error(`[TimetableScreen effect] loadWeek(${week}) failed:`, err);
+        console.error(`[TimetableScreen] loadWeek(${week}) failed:`, err);
       })
       .finally(() => {
         fetchingWeeksRef.current.delete(week);
@@ -111,12 +94,10 @@ export default function TimetableScreen() {
   const activeWeekDays = useMemo(() => {
     const wk = weeks[activeWeekStart];
     if (wk && wk.days && wk.days.length === 5 && weekHasLessons(wk)) {
-      console.log(`[TimetableScreen activeWeekDays] Using weeks[${activeWeekStart}] (lessons: ${wk.days.reduce((s, d) => s + d.lessons.length, 0)})`);
       return wk.days;
     }
     const cachedWk = librusClient.getCachedWeekSchedule(activeWeekStart);
     if (cachedWk && cachedWk.days && cachedWk.days.length === 5 && weekHasLessons(cachedWk)) {
-      console.log(`[TimetableScreen activeWeekDays] Using cachedWk for ${activeWeekStart} (lessons: ${cachedWk.days.reduce((s, d) => s + d.lessons.length, 0)})`);
       return cachedWk.days;
     }
     const allC = getAllCachedWeeks();
@@ -124,7 +105,6 @@ export default function TimetableScreen() {
       Object.values(weeks).find((w) => weekHasLessons(w)) ??
       Object.values(allC).find((w) => weekHasLessons(w));
     if (anyWk && anyWk.days && anyWk.days.length === 5) {
-      console.log(`[TimetableScreen activeWeekDays] Templating ${activeWeekStart} from cached week ${anyWk.weekStart}`);
       const monDate = parseISODate(activeWeekStart);
       return anyWk.days.map((d, idx) => {
         const dateStr = toISODate(addDays(monDate, idx));
@@ -145,7 +125,6 @@ export default function TimetableScreen() {
         };
       });
     }
-    console.log(`[TimetableScreen activeWeekDays] No lessons in state or cache, returning empty days for ${activeWeekStart}`);
     return buildEmptyWeekDays(activeWeekStart);
   }, [weeks, activeWeekStart]);
 
@@ -166,6 +145,18 @@ export default function TimetableScreen() {
     },
     [SCREEN_WIDTH]
   );
+
+  // Re-align horizontal day pager whenever foldable / window width changes
+  useEffect(() => {
+    const idx = selectedDayIndexRef.current;
+    const timer = setTimeout(() => {
+      pagerRef.current?.scrollToOffset({
+        offset: idx * SCREEN_WIDTH,
+        animated: false,
+      });
+    }, 40);
+    return () => clearTimeout(timer);
+  }, [SCREEN_WIDTH]);
 
   const handlePagerMomentumEnd = (
     e: NativeSyntheticEvent<NativeScrollEvent>
@@ -230,10 +221,11 @@ export default function TimetableScreen() {
         </View>
       ) : (
         <FlatList
+          key={`timetable-pager-${Math.round(SCREEN_WIDTH)}`}
           ref={pagerRef}
           data={activeWeekDays}
           keyExtractor={(item) => `${activeWeekStart}-${item.date}-${item.lessons.length}`}
-          extraData={activeWeekDays}
+          extraData={{ activeWeekDays, SCREEN_WIDTH }}
           horizontal
           pagingEnabled
           showsHorizontalScrollIndicator={false}
@@ -241,12 +233,20 @@ export default function TimetableScreen() {
           snapToInterval={SCREEN_WIDTH}
           snapToAlignment="center"
           disableIntervalMomentum={true}
-          initialScrollIndex={initialDayIndex}
+          initialScrollIndex={selectedDayIndex}
           getItemLayout={(_, index) => ({
             length: SCREEN_WIDTH,
             offset: SCREEN_WIDTH * index,
             index,
           })}
+          onScrollToIndexFailed={(info) => {
+            setTimeout(() => {
+              pagerRef.current?.scrollToOffset({
+                offset: info.index * SCREEN_WIDTH,
+                animated: false,
+              });
+            }, 50);
+          }}
           onMomentumScrollEnd={handlePagerMomentumEnd}
           renderItem={({ item }) => (
             <View style={{ width: SCREEN_WIDTH, flex: 1 }}>
