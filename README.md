@@ -15,7 +15,7 @@ Fast, dark-mode mobile client for **Librus Synergia**, built with Expo and React
 
 1. Download **`ligmus.apk`** from the [Latest Release](https://github.com/Haomari/Ligmus/releases/latest).
 2. Open the downloaded file on your Android device (allow installation from unknown sources if prompted).
-3. Future updates can be checked and installed directly from **Settings -> Sprawdź aktualizacje**.
+3. Future updates can be checked and installed directly from **Settings**.
 
 ## Local Development
 
