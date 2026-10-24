@@ -1,44 +1,31 @@
-# 📱 Aplikacja mobilna
+# Ligmus
 
-Aplikacja mobilna stworzona przy użyciu **Expo** i **React Native**.
+Fast, dark-mode mobile client for **Librus Synergia**, built with Expo and React Native.
 
-## 📦 Instalacja aplikacji na Androidzie
+## Features
 
-Jeśli chcesz korzystać z gotowej aplikacji, nie musisz instalować Expo ani Node.js.
+- **Dashboard, Grades & Timetable** - Grades with weighted averages, substitutions, cancelled lessons, lesson topics, lucky number, and instant offline cache.
+- **Attendance** - Full school-year synchronization, per-subject stats, semester filters, and `<50%` / `50-60%` threshold warnings.
+- **Messages & Excuse Presets** - Inbox/sent messages, attachment downloads to any folder, and an absence excuse generator with customizable presets.
+- **Background Notifications** - Checks for new messages, grades, and timetable changes in the background with **Smart Hours** (`Mon-Fri, 07:30-18:00`).
+- **Foldable & Tablet Layout** - Adaptive right-side thumb navigation rail and multi-column grids on wide screens.
+- **In-App Updater** - Checks GitHub Releases and installs new APK versions directly from the app.
 
-Wystarczy pobrać plik **APK** i zainstalować go na telefonie z systemem Android.
+## Installation (Android)
 
-### Instalacja
+1. Download **`ligmus.apk`** from the [Latest Release](https://github.com/Haomari/Ligmus/releases/latest).
+2. Open the downloaded file on your Android device (allow installation from unknown sources if prompted).
+3. Future updates can be checked and installed directly from **Settings -> Sprawdź aktualizacje**.
 
-Pobierz plik ligmus.apk z sekcji Releases tego repozytorium GitHub i go otwórz.
-
-W przypadku blokady systemu Android, zezwól w ustawieniach na instalację z nieznanych źródeł i zatwierdź instalację.
-
----
-
-## 💻 Uruchomienie projektu lokalnie
-
-Jeżeli chcesz uruchomić projekt i rozwijać aplikację, najpierw zainstaluj zależności:
+## Local Development
 
 ```bash
 npm install
-```
-
-Następnie uruchom expo
-```bash
 npx expo start
 ```
-Po uruchomieniu pojawią się opcje uruchomienia aplikacji na:
 
-Android Emulator
+> Background notifications and in-app APK installation require a native Android build (`npx expo run:android`) rather than Expo Go.
 
-iOS Simulator
+## Privacy
 
-Expo Go
-
-Development Build
-
-
-
-
-
+Ligmus connects directly to `synergia.librus.pl` / `api.librus.pl` from your device. Credentials are stored locally in encrypted storage (`expo-secure-store`) and are never sent to third-party servers.
