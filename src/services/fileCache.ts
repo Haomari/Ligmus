@@ -26,6 +26,9 @@ const SENT_EXCUSE_DATES_FILE = 'sent_excuse_dates.json';
 const MESSAGES_INBOX_FILE = 'messages_inbox.json';
 const MESSAGES_SENT_FILE = 'messages_sent.json';
 const NOTIFIED_SYNC_STATE_FILE = 'notified_sync_state.json';
+const UPDATE_SETTINGS_FILE = 'update_settings.json';
+
+export type UpdateChannel = 'stable' | 'beta';
 
 export const DEFAULT_EXCUSE_SETTINGS: ExcuseTemplateSettings = {
   subject: 'Usprawiedliwienie',
@@ -497,6 +500,21 @@ export function markExcuseDatesAsSent(dates: string[]): void {
   writeJsonSync(SENT_EXCUSE_DATES_FILE, Array.from(existing).sort());
 }
 
+export function getUpdateChannel(currentAppVersion?: string): UpdateChannel {
+  const saved = readJsonSync<{ channel?: string }>(UPDATE_SETTINGS_FILE);
+  if (saved?.channel === 'beta' || saved?.channel === 'stable') {
+    return saved.channel;
+  }
+  if (currentAppVersion && currentAppVersion.includes('-')) {
+    return 'beta';
+  }
+  return 'stable';
+}
+
+export function saveUpdateChannel(channel: UpdateChannel): void {
+  writeJsonSync(UPDATE_SETTINGS_FILE, { channel });
+}
+
 /**
  * Clears cached school-year data (timetables, attendance, realizations, stats, messages, sent excuse dates)
  * while preserving user preferences like ExcuseTemplateSettings and DownloadFolderUri.
@@ -506,6 +524,7 @@ export function clearDataCachesOnly(): void {
   const savedExcusePresets = readJsonSync<ExcusePresetsStore>(EXCUSE_PRESETS_FILE);
   const savedDownloadSettings = readJsonSync<{ folderUri?: string | null }>(DOWNLOAD_SETTINGS_FILE);
   const savedNotifiedState = readJsonSync<NotifiedSyncState>(NOTIFIED_SYNC_STATE_FILE);
+  const savedUpdateSettings = readJsonSync<{ channel?: string }>(UPDATE_SETTINGS_FILE);
   clearAllFileCaches();
   if (savedExcuseSettings) {
     writeJsonSync(EXCUSE_SETTINGS_FILE, savedExcuseSettings);
@@ -518,6 +537,9 @@ export function clearDataCachesOnly(): void {
   }
   if (savedNotifiedState) {
     writeJsonSync(NOTIFIED_SYNC_STATE_FILE, savedNotifiedState);
+  }
+  if (savedUpdateSettings) {
+    writeJsonSync(UPDATE_SETTINGS_FILE, savedUpdateSettings);
   }
   writeJsonSync(SCHOOL_YEAR_META_FILE, { schoolYearId: getCurrentSchoolYearId() });
 }

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -29,8 +30,11 @@ import {
   getCurrentSchoolYearId,
   getDownloadFolderUri,
   getExcusePresetsStore,
+  getUpdateChannel,
   saveDownloadFolderUri,
   saveExcusePresetsStore,
+  saveUpdateChannel,
+  UpdateChannel,
 } from '@/services/fileCache';
 import { ExcusePreset, ExcusePresetsStore } from '@/types/librus';
 import { formatShortStudentSignature } from '@/components/message-compose-modal';
@@ -64,6 +68,9 @@ export default function SettingsScreen() {
   const [downloadFolderUri, setDownloadFolderUri] = useState<string | null>(() =>
     getDownloadFolderUri()
   );
+  const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(() =>
+    getUpdateChannel(APP_VERSION)
+  );
   const [clearingCache, setClearingCache] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -80,6 +87,7 @@ export default function SettingsScreen() {
         if (!active) return;
         setExcuseStore(getExcusePresetsStore());
         setDownloadFolderUri(getDownloadFolderUri());
+        setUpdateChannel(getUpdateChannel(APP_VERSION));
       });
       return () => {
         active = false;
@@ -202,10 +210,29 @@ export default function SettingsScreen() {
     );
   };
 
+  const handleChangeUpdateChannel = async (channel: UpdateChannel) => {
+    if (channel === updateChannel) return;
+    setUpdateChannel(channel);
+    saveUpdateChannel(channel);
+    if (channel === 'beta') {
+      setToastMessage('Kanał aktualizacji: Beta (nowe funkcje testowe)');
+      try {
+        const res = await checkForAppUpdate({ channelOverride: 'beta' });
+        if (res.updateAvailable) {
+          setUpdateModalInfo(res);
+        }
+      } catch {
+        // Ignore network errors when switching channel
+      }
+    } else {
+      setToastMessage('Kanał aktualizacji: Stabilny');
+    }
+  };
+
   const handleCheckForUpdates = async () => {
     setCheckingUpdate(true);
     try {
-      const res = await checkForAppUpdate();
+      const res = await checkForAppUpdate({ channelOverride: updateChannel });
       if (res.updateAvailable) {
         setUpdateModalInfo(res);
       } else {
@@ -225,7 +252,7 @@ export default function SettingsScreen() {
 
   const handlePreviewUpdateModal = () => {
     if (__DEV__) {
-      setUpdateModalInfo(getMockPreviewUpdate());
+      setUpdateModalInfo(getMockPreviewUpdate(updateChannel));
     }
   };
 
@@ -533,7 +560,9 @@ export default function SettingsScreen() {
             <View style={styles.expoGoBanner}>
               <Ionicons name="information-circle-outline" size={17} color="#38bdf8" />
               <Text style={styles.expoGoBannerDesc}>
-                Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji APK.
+                {Platform.OS === 'ios'
+                  ? 'Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji IPA.'
+                  : 'Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji APK.'}
               </Text>
             </View>
           )}
@@ -614,33 +643,37 @@ export default function SettingsScreen() {
           <Text style={styles.sectionHeader}>Dane i pliki</Text>
 
           <View style={styles.card}>
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={styles.folderMainTap}
-                activeOpacity={0.8}
-                onPress={handleChooseDownloadFolder}>
-                <Ionicons name="folder-open-outline" size={20} color="#38bdf8" />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.actionTitle}>Folder zapisu załączników</Text>
-                  <Text style={styles.actionSubText} numberOfLines={1}>
-                    {formatDownloadFolderLabel(downloadFolderUri)}
-                  </Text>
+            {Platform.OS === 'android' && (
+              <>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={styles.folderMainTap}
+                    activeOpacity={0.8}
+                    onPress={handleChooseDownloadFolder}>
+                    <Ionicons name="folder-open-outline" size={20} color="#38bdf8" />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.actionTitle}>Folder zapisu załączników</Text>
+                      <Text style={styles.actionSubText} numberOfLines={1}>
+                        {formatDownloadFolderLabel(downloadFolderUri)}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  {downloadFolderUri ? (
+                    <TouchableOpacity
+                      onPress={handleResetDownloadFolder}
+                      style={styles.inlineResetPill}>
+                      <Text style={styles.inlineResetPillText}>Resetuj</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity onPress={handleChooseDownloadFolder} hitSlop={8}>
+                      <Ionicons name="chevron-forward" size={18} color="#64748b" />
+                    </TouchableOpacity>
+                  )}
                 </View>
-              </TouchableOpacity>
-              {downloadFolderUri ? (
-                <TouchableOpacity
-                  onPress={handleResetDownloadFolder}
-                  style={styles.inlineResetPill}>
-                  <Text style={styles.inlineResetPillText}>Resetuj</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity onPress={handleChooseDownloadFolder} hitSlop={8}>
-                  <Ionicons name="chevron-forward" size={18} color="#64748b" />
-                </TouchableOpacity>
-              )}
-            </View>
 
-            <View style={styles.divider} />
+                <View style={styles.divider} />
+              </>
+            )}
 
             <TouchableOpacity
               style={styles.actionRow}
@@ -673,7 +706,58 @@ export default function SettingsScreen() {
           <View style={styles.card}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Wersja</Text>
-              <Text style={styles.infoValue}>{formatVersionTag(APP_VERSION)}</Text>
+              <View style={styles.versionValueRow}>
+                <Text style={styles.infoValue}>{formatVersionTag(APP_VERSION)}</Text>
+                {APP_VERSION.includes('-') && (
+                  <View style={styles.versionBetaBadge}>
+                    <Text style={styles.versionBetaBadgeText}>BETA</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.settingBlock}>
+              <Text style={styles.settingLabel}>Kanał aktualizacji</Text>
+              <View style={styles.intervalOptionsRow}>
+                {(
+                  [
+                    { label: 'Stabilny', val: 'stable' as UpdateChannel },
+                    { label: 'Beta', val: 'beta' as UpdateChannel },
+                  ]
+                ).map((opt) => {
+                  const isActive = updateChannel === opt.val;
+                  return (
+                    <TouchableOpacity
+                      key={opt.val}
+                      style={[
+                        styles.intervalChip,
+                        isActive &&
+                          (opt.val === 'beta'
+                            ? styles.betaChannelChipActive
+                            : styles.intervalChipActive),
+                      ]}
+                      onPress={() => handleChangeUpdateChannel(opt.val)}>
+                      <Text
+                        style={[
+                          styles.intervalChipText,
+                          isActive &&
+                            (opt.val === 'beta'
+                              ? styles.betaChannelChipTextActive
+                              : styles.intervalChipTextActive),
+                        ]}>
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.channelDescText}>
+                {updateChannel === 'beta'
+                  ? 'Wcześniejszy dostęp do nowych funkcji testowych (beta-updates) oraz wydań stabilnych.'
+                  : 'Tylko sprawdzone wydania główne z gałęzi stabilnej (master).'}
+              </Text>
             </View>
 
             <View style={styles.divider} />
@@ -982,8 +1066,41 @@ const styles = StyleSheet.create({
   },
   infoRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 3,
+  },
+  versionValueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  versionBetaBadge: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  versionBetaBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#fbbf24',
+    letterSpacing: 0.4,
+  },
+  betaChannelChipActive: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderColor: '#f59e0b',
+  },
+  betaChannelChipTextActive: {
+    color: '#fbbf24',
+    fontWeight: '700',
+  },
+  channelDescText: {
+    fontSize: 11.5,
+    color: '#94a3b8',
+    lineHeight: 16,
   },
   infoLabel: {
     fontSize: 13.5,

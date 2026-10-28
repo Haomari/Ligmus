@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -10,7 +11,8 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Directory } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   LibrusAttachment,
@@ -43,27 +45,33 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
   onMarkedRead,
 }) => {
   const insets = useSafeAreaInsets();
-  const [detail, setDetail] = useState<LibrusMessageDetail | null>(null);
+  const [loadedDetail, setLoadedDetail] = useState<LibrusMessageDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  const msgId = message?.id;
+  const msgFolderId = message?.folderId;
+  const msgSender = message?.sender;
+  const msgIsUnread = message?.isUnread;
+
   useEffect(() => {
-    if (!visible || !message) {
-      setDetail(null);
+    if (!visible || !msgId || !msgFolderId) {
       return;
     }
 
     let cancelled = false;
-    setLoading(true);
-    librusClient
-      .getMessageDetail(message.folderId, message.id, message.sender)
+    Promise.resolve()
+      .then(() => {
+        if (!cancelled) setLoading(true);
+        return librusClient.getMessageDetail(msgFolderId, msgId, msgSender);
+      })
       .then((res) => {
         if (cancelled) return;
         if (res) {
-          setDetail(res);
-          if (message.folderId === 5 && message.isUnread) {
-            onMarkedRead(message.id);
+          setLoadedDetail(res);
+          if (msgFolderId === 5 && msgIsUnread) {
+            onMarkedRead(msgId);
           }
         }
       })
@@ -74,9 +82,16 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [visible, message?.id, message?.folderId]);
+  }, [visible, msgId, msgFolderId, msgSender, msgIsUnread, onMarkedRead]);
 
   if (!message) return null;
+
+  const detail =
+    visible &&
+    loadedDetail?.id === message.id &&
+    loadedDetail?.folderId === message.folderId
+      ? loadedDetail
+      : null;
 
   const displaySubject = detail?.subject || message.subject;
 
@@ -115,6 +130,27 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
         (result.fileName || att.name || 'zalacznik')
           .replace(/[\\/:*?"<>|]/g, '_')
           .trim() || 'zalacznik';
+
+      if (Platform.OS === 'ios') {
+        const tempFile = new File(Paths.cache, safeFileName);
+        tempFile.create({ overwrite: true });
+        tempFile.write(result.bytes);
+
+        const canShare = await Sharing.isAvailableAsync();
+        if (!canShare) {
+          Alert.alert(
+            'Udostępnianie niedostępne',
+            'Na tym urządzeniu nie można otworzyć systemowego arkusza zapisu pliku.'
+          );
+          return;
+        }
+
+        await Sharing.shareAsync(tempFile.uri, {
+          mimeType: result.mimeType,
+          dialogTitle: safeFileName,
+        });
+        return;
+      }
 
       let savedUri = getDownloadFolderUri();
       let wroteSuccessfully = false;
@@ -302,7 +338,9 @@ export const MessageDetailsModal: React.FC<MessageDetailsModalProps> = ({
                           {att.name}
                         </Text>
                         <Text style={styles.attachmentHint}>
-                          Dotknij, aby pobrać plik na telefon
+                          {Platform.OS === 'ios'
+                            ? 'Dotknij, aby zapisać w Plikach lub udostępnić'
+                            : 'Dotknij, aby pobrać plik na telefon'}
                         </Text>
                       </View>
                       <View style={styles.downloadBadge}>

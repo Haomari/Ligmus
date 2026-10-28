@@ -1,0 +1,227 @@
+name: Build & Publish Release (APK + IPA)
+
+on:
+  push:
+    branches:
+      - master
+      - beta-updates
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-version:
+    name: Check App Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      should_build: ${{ steps.meta.outputs.should_build }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Inspect app.json version and existing releases
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version.trim().replace(/^[vV]/, '')")
+          TAG="v${VERSION}"
+
+          if [[ "${{ github.ref_name }}" == "beta-updates" || "$VERSION" == *"-"* ]]; then
+            IS_PRERELEASE="true"
+          else
+            IS_PRERELEASE="false"
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SHOULD_BUILD="true"
+            echo "Manual workflow_dispatch triggered -> building ${TAG} (prerelease=${IS_PRERELEASE})"
+          else
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
+
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              SHOULD_BUILD="false"
+              echo "Release ${TAG} already exists on GitHub -> skipping build."
+            else
+              SHOULD_BUILD="true"
+              echo "New version ${TAG} detected -> building APK and IPA (prerelease=${IS_PRERELEASE})."
+            fi
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "should_build=${SHOULD_BUILD}" >> "$GITHUB_OUTPUT"
+
+  build-android:
+    name: Build Android APK
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Expo Prebuild (Android)
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Assemble Release APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon -x lint -x test
+
+      - name: Prepare ligmus.apk
+        run: cp android/app/build/outputs/apk/release/app-release.apk ligmus.apk
+
+      - name: Upload ligmus.apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ligmus-apk
+          path: ligmus.apk
+          if-no-files-found: error
+
+  build-ios:
+    name: Build Unsigned iOS IPA
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: macos-26
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Expo Prebuild (iOS)
+        run: |
+          npx expo prebuild --platform ios --clean --no-install
+          echo "export NODE_BINARY=$(command -v node)" > ios/.xcode.env.local
+          for ent in ios/*/*.entitlements; do
+            if [ -f "$ent" ]; then
+              /usr/libexec/PlistBuddy -c "Delete :aps-environment" "$ent" 2>/dev/null || true
+            fi
+          done
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install --repo-update
+
+      - name: Build Release .app (Unsigned)
+        run: |
+          WORKSPACE_PATH=$(ls -d ios/*.xcworkspace | head -n 1)
+          SCHEME_NAME=$(basename "$WORKSPACE_PATH" .xcworkspace)
+          echo "Building workspace=${WORKSPACE_PATH} scheme=${SCHEME_NAME}"
+          xcodebuild \
+            -workspace "$WORKSPACE_PATH" \
+            -scheme "$SCHEME_NAME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Package ligmus.ipa
+        run: |
+          APP_PATH=$(find ios/build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: Built .app bundle not found!"
+            exit 1
+          fi
+          rm -rf Payload ligmus.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          APP_BUNDLE_NAME=$(basename "$APP_PATH")
+          codesign --force --deep --sign - "Payload/${APP_BUNDLE_NAME}"
+          zip -r -q ligmus.ipa Payload
+
+      - name: Upload ligmus.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ligmus-ipa
+          path: ligmus.ipa
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - check-version
+      - build-android
+      - build-ios
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download ligmus.apk
+        uses: actions/download-artifact@v4
+        with:
+          name: ligmus-apk
+
+      - name: Download ligmus.ipa
+        uses: actions/download-artifact@v4
+        with:
+          name: ligmus-ipa
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-version.outputs.tag }}
+          name: Ligmus ${{ needs.check-version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.check-version.outputs.is_prerelease == 'true' }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            ligmus.apk
+            ligmus.ipa

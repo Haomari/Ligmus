@@ -1,8 +1,11 @@
 import Constants from 'expo-constants';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as IntentLauncher from 'expo-intent-launcher';
+import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
+import { getUpdateChannel, UpdateChannel } from './fileCache';
+
+export type { UpdateChannel };
 
 export const GITHUB_REPO = 'Haomari/Ligmus';
 export const GITHUB_RELEASES_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
@@ -36,7 +39,12 @@ export interface UpdateCheckResult {
   apkUrl: string | null;
   apkFileName: string | null;
   apkSizeBytes: number | null;
+  ipaUrl: string | null;
+  ipaFileName: string | null;
+  ipaSizeBytes: number | null;
   htmlUrl: string | null;
+  channel: UpdateChannel;
+  isPrerelease: boolean;
   isPreview?: boolean;
 }
 
@@ -95,6 +103,7 @@ interface GitHubReleaseItem {
   body?: string;
   draft?: boolean;
   prerelease?: boolean;
+  target_commitish?: string;
   published_at?: string;
   html_url?: string;
   assets?: GitHubReleaseAsset[];
@@ -105,16 +114,45 @@ export function formatBytesToMB(bytes: number | null | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export interface CheckForUpdateOptions {
+  currentVersionOverride?: string;
+  channelOverride?: UpdateChannel;
+}
+
+function emptyUpdateResult(currentVersion: string, channel: UpdateChannel): UpdateCheckResult {
+  return {
+    updateAvailable: false,
+    currentVersion,
+    latestVersion: null,
+    releaseTitle: null,
+    releaseNotes: null,
+    publishedAt: null,
+    apkUrl: null,
+    apkFileName: null,
+    apkSizeBytes: null,
+    ipaUrl: null,
+    ipaFileName: null,
+    ipaSizeBytes: null,
+    htmlUrl: null,
+    channel,
+    isPrerelease: false,
+  };
+}
+
 export async function checkForAppUpdate(
-  currentVersionOverride?: string
+  options?: string | CheckForUpdateOptions
 ): Promise<UpdateCheckResult> {
-  const currentVersion = normalizeRawVersion(currentVersionOverride ?? APP_VERSION);
+  const opts: CheckForUpdateOptions =
+    typeof options === 'string' ? { currentVersionOverride: options } : options ?? {};
+
+  const currentVersion = normalizeRawVersion(opts.currentVersionOverride ?? APP_VERSION);
+  const channel: UpdateChannel = opts.channelOverride ?? getUpdateChannel(currentVersion);
 
   const response = await fetch(GITHUB_RELEASES_URL, {
     method: 'GET',
     headers: {
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'Ligmus-Android-Updater',
+      'User-Agent': 'Ligmus-Updater',
     },
   });
 
@@ -124,57 +162,61 @@ export async function checkForAppUpdate(
 
   const releases = (await response.json()) as GitHubReleaseItem[];
   if (!Array.isArray(releases) || releases.length === 0) {
-    return {
-      updateAvailable: false,
-      currentVersion,
-      latestVersion: null,
-      releaseTitle: null,
-      releaseNotes: null,
-      publishedAt: null,
-      apkUrl: null,
-      apkFileName: null,
-      apkSizeBytes: null,
-      htmlUrl: null,
-    };
+    return emptyUpdateResult(currentVersion, channel);
   }
 
-  const publishedReleases = releases.filter(
-    (rel) => !rel.draft && Boolean(rel.tag_name || rel.name)
-  );
+  const eligibleReleases = releases.filter((rel) => {
+    if (rel.draft) return false;
+    const rawVer = rel.tag_name || rel.name;
+    if (!rawVer) return false;
 
-  if (publishedReleases.length === 0) {
-    return {
-      updateAvailable: false,
-      currentVersion,
-      latestVersion: null,
-      releaseTitle: null,
-      releaseNotes: null,
-      publishedAt: null,
-      apkUrl: null,
-      apkFileName: null,
-      apkSizeBytes: null,
-      htmlUrl: null,
-    };
+    if (channel === 'stable') {
+      const parsed = parseSemver(rawVer);
+      const isBetaRelease =
+        Boolean(rel.prerelease) ||
+        rel.target_commitish === 'beta-updates' ||
+        Boolean(parsed?.prerelease);
+      return !isBetaRelease;
+    }
+
+    // Beta channel considers both beta pre-releases and stable releases, picking highest semver
+    return true;
+  });
+
+  if (eligibleReleases.length === 0) {
+    return emptyUpdateResult(currentVersion, channel);
   }
 
-  publishedReleases.sort((r1, r2) => {
+  eligibleReleases.sort((r1, r2) => {
     const v1 = r1.tag_name || r1.name || '0.0.0';
     const v2 = r2.tag_name || r2.name || '0.0.0';
     return compareSemver(v2, v1);
   });
 
-  const bestRelease = publishedReleases[0];
+  const bestRelease = eligibleReleases[0];
   const latestRaw = bestRelease.tag_name || bestRelease.name || currentVersion;
   const latestVersion = normalizeRawVersion(latestRaw);
   const isNewer = compareSemver(latestVersion, currentVersion) > 0;
 
-  const apkAsset = (bestRelease.assets ?? []).find((asset) => {
+  const assets = bestRelease.assets ?? [];
+
+  const apkAsset = assets.find((asset) => {
     const lowerName = (asset.name ?? '').toLowerCase();
     return (
       lowerName.endsWith('.apk') ||
       asset.content_type === 'application/vnd.android.package-archive'
     );
   });
+
+  const ipaAsset = assets.find((asset) => {
+    const lowerName = (asset.name ?? '').toLowerCase();
+    return lowerName.endsWith('.ipa');
+  });
+
+  const isPrerelease =
+    Boolean(bestRelease.prerelease) ||
+    bestRelease.target_commitish === 'beta-updates' ||
+    Boolean(parseSemver(latestVersion)?.prerelease);
 
   return {
     updateAvailable: isNewer,
@@ -186,12 +228,25 @@ export async function checkForAppUpdate(
     apkUrl: apkAsset?.browser_download_url ?? null,
     apkFileName: apkAsset?.name ?? null,
     apkSizeBytes: apkAsset?.size ?? null,
+    ipaUrl: ipaAsset?.browser_download_url ?? null,
+    ipaFileName: ipaAsset?.name ?? null,
+    ipaSizeBytes: ipaAsset?.size ?? null,
     htmlUrl: bestRelease.html_url ?? `https://github.com/${GITHUB_REPO}/releases`,
+    channel,
+    isPrerelease,
   };
 }
 
 export async function openReleaseInBrowser(url: string | null): Promise<void> {
   const target = url || `https://github.com/${GITHUB_REPO}/releases`;
+  if (Platform.OS === 'ios') {
+    try {
+      await Linking.openURL(target);
+      return;
+    } catch {
+      // Fall back to embedded browser if system URL opening fails
+    }
+  }
   await WebBrowser.openBrowserAsync(target);
 }
 
@@ -252,6 +307,9 @@ export async function downloadAndInstallUpdate(
   });
 
   const contentUri = await FileSystem.getContentUriAsync(result.uri);
+  // Lazy-require Android-only launcher inside Android guard
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const IntentLauncher = require('expo-intent-launcher') as typeof import('expo-intent-launcher');
 
   // 1 = FLAG_GRANT_READ_URI_PERMISSION, 268435456 = FLAG_ACTIVITY_NEW_TASK (0x10000000)
   await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
@@ -261,21 +319,31 @@ export async function downloadAndInstallUpdate(
   });
 }
 
-export function getMockPreviewUpdate(): UpdateCheckResult {
+export function getMockPreviewUpdate(channelOverride?: UpdateChannel): UpdateCheckResult {
+  const channel = channelOverride ?? getUpdateChannel(APP_VERSION);
+  const isBeta = channel === 'beta';
+  const latestVersion = isBeta ? '1.2.0-beta.1' : '1.2.0';
   return {
     updateAvailable: true,
     currentVersion: APP_VERSION,
-    latestVersion: '1.1.0',
-    releaseTitle: 'Ligmus v1.1.0 — Podgląd aktualizacji',
+    latestVersion,
+    releaseTitle: isBeta
+      ? `Ligmus v${latestVersion} — Podgląd aktualizacji Beta`
+      : `Ligmus v${latestVersion} — Podgląd aktualizacji`,
     releaseNotes:
-      '• Automatyczne pobieranie i instalacja aktualizacji prosto z aplikacji\n' +
-      '• Zoptymalizowany układ dla ekranów składanych (Fold) oraz tabletów\n' +
-      '• Nowy generator usprawiedliwień i szybki wybór folderu pobierania załączników',
+      '• Wsparcie dla iOS (plik IPA dla SideStore / AltStore) oraz Androida (APK)\n' +
+      '• Dwa kanały aktualizacji w ustawieniach: Stabilny (master) oraz Beta (beta-updates)\n' +
+      '• Udostępnianie i zapisywanie załączników przez systemowy arkusz iOS',
     publishedAt: new Date().toISOString(),
     apkUrl: null,
-    apkFileName: 'ligmus-v1.1.0.apk',
-    apkSizeBytes: 44 * 1024 * 1024,
+    apkFileName: 'ligmus.apk',
+    apkSizeBytes: 104 * 1024 * 1024,
+    ipaUrl: null,
+    ipaFileName: 'ligmus.ipa',
+    ipaSizeBytes: 38 * 1024 * 1024,
     htmlUrl: `https://github.com/${GITHUB_REPO}/releases`,
+    channel,
+    isPrerelease: isBeta,
     isPreview: true,
   };
 }

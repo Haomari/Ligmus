@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -57,21 +58,30 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
     return null;
   }
 
+  const isIOS = Platform.OS === 'ios';
   const currentTag = formatVersionTag(updateInfo.currentVersion);
   const latestTag = formatVersionTag(updateInfo.latestVersion || updateInfo.currentVersion);
-  const apkSizeLabel = formatBytesToMB(updateInfo.apkSizeBytes);
+  const packageSizeBytes = isIOS ? updateInfo.ipaSizeBytes : updateInfo.apkSizeBytes;
+  const packageSizeLabel = formatBytesToMB(packageSizeBytes);
   const hasApkAsset = Boolean(updateInfo.apkUrl);
+  const hasIpaAsset = Boolean(updateInfo.ipaUrl);
   const isPreview = Boolean(updateInfo.isPreview);
+  const isBetaRelease = Boolean(updateInfo.isPrerelease);
 
   const percent = Math.round((progressInfo?.progress ?? 0) * 100);
   const writtenMB = formatBytesToMB(progressInfo?.bytesWritten);
-  const totalMB = formatBytesToMB(progressInfo?.totalBytes || updateInfo.apkSizeBytes);
+  const totalMB = formatBytesToMB(progressInfo?.totalBytes || packageSizeBytes);
 
   const handlePrimaryAction = async () => {
     if (isDownloading) return;
     setErrorMessage(null);
 
     if (isPreview) {
+      if (isIOS) {
+        setPreviewDone(true);
+        return;
+      }
+
       setPreviewDone(false);
       setIsDownloading(true);
       const totalBytes = updateInfo.apkSizeBytes ?? 44 * 1024 * 1024;
@@ -96,6 +106,12 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
           setPreviewDone(true);
         }
       }, 100);
+      return;
+    }
+
+    if (isIOS) {
+      await openReleaseInBrowser(updateInfo.ipaUrl || updateInfo.htmlUrl);
+      onClose();
       return;
     }
 
@@ -129,13 +145,40 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
   };
 
   const handleOpenBrowserFallback = async () => {
-    await openReleaseInBrowser(updateInfo.apkUrl || updateInfo.htmlUrl);
+    const fallbackUrl = isIOS
+      ? updateInfo.ipaUrl || updateInfo.htmlUrl
+      : updateInfo.apkUrl || updateInfo.htmlUrl;
+    await openReleaseInBrowser(fallbackUrl);
   };
 
   const showSubtitle =
     Boolean(updateInfo.releaseTitle) &&
     updateInfo.releaseTitle !== latestTag &&
     updateInfo.releaseTitle !== updateInfo.latestVersion;
+
+  const primaryButtonIcon = isIOS
+    ? hasIpaAsset
+      ? 'download-outline'
+      : 'open-outline'
+    : hasApkAsset || isPreview
+      ? 'download-outline'
+      : 'open-outline';
+
+  const primaryButtonLabel = isIOS
+    ? isPreview
+      ? previewDone
+        ? 'Przetestuj ponownie'
+        : 'Pobierz IPA w Safari'
+      : hasIpaAsset
+        ? 'Pobierz IPA w Safari'
+        : 'Otwórz w Safari'
+    : isPreview
+      ? previewDone
+        ? 'Przetestuj ponownie'
+        : 'Pobierz i zainstaluj'
+      : hasApkAsset
+        ? 'Pobierz i zainstaluj'
+        : 'Otwórz stronę wydania';
 
   return (
     <Modal
@@ -154,7 +197,11 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             </View>
             <View style={styles.headerTextCol}>
               <Text style={styles.title}>
-                {isPreview ? 'Podgląd aktualizacji' : 'Dostępna aktualizacja'}
+                {isPreview
+                  ? 'Podgląd aktualizacji'
+                  : isBetaRelease
+                    ? 'Dostępna aktualizacja Beta'
+                    : 'Dostępna aktualizacja'}
               </Text>
               {showSubtitle ? (
                 <Text style={styles.subtitle} numberOfLines={2}>
@@ -174,11 +221,16 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
               <View style={styles.newVerBadge}>
                 <Text style={styles.newVerText}>{latestTag}</Text>
               </View>
+              {isBetaRelease && (
+                <View style={styles.betaBadge}>
+                  <Text style={styles.betaBadgeText}>BETA</Text>
+                </View>
+              )}
             </View>
-            {apkSizeLabel ? (
+            {packageSizeLabel ? (
               <View style={styles.sizeBadge}>
                 <Ionicons name="document-outline" size={13} color="#94a3b8" />
-                <Text style={styles.sizeText}>{apkSizeLabel}</Text>
+                <Text style={styles.sizeText}>{packageSizeLabel}</Text>
               </View>
             ) : null}
           </View>
@@ -197,7 +249,17 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             </ScrollView>
           </View>
 
-          {/* Download Progress */}
+          {/* iOS Sideloading Hint */}
+          {isIOS && !previewDone && (
+            <View style={styles.iosHintBox}>
+              <Ionicons name="information-circle-outline" size={17} color="#38bdf8" />
+              <Text style={styles.iosHintText}>
+                Pobierz plik IPA w Safari, a następnie zainstaluj aktualizację przez SideStore lub AltStore.
+              </Text>
+            </View>
+          )}
+
+          {/* Download Progress (Android) */}
           {isDownloading && (
             <View style={styles.progressBox}>
               <View style={styles.progressTrack}>
@@ -223,7 +285,9 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             <View style={styles.previewSuccessBox}>
               <Ionicons name="checkmark-circle" size={18} color="#10b981" />
               <Text style={styles.previewSuccessText}>
-                Tryb podglądu — po opublikowaniu nowego wydania z plikiem APK na GitHub Releases w tym miejscu automatycznie uruchomi się instalator Androida.
+                {isIOS
+                  ? 'Tryb podglądu — po wydaniu nowej wersji na GitHub Releases przycisk otworzy pobieranie pliku IPA bezpośrednio w Safari.'
+                  : 'Tryb podglądu — po opublikowaniu nowego wydania z plikiem APK na GitHub Releases w tym miejscu automatycznie uruchomi się instalator Androida.'}
               </Text>
             </View>
           )}
@@ -265,19 +329,11 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
               ) : (
                 <>
                   <Ionicons
-                    name={hasApkAsset || isPreview ? 'download-outline' : 'open-outline'}
+                    name={primaryButtonIcon}
                     size={18}
                     color="#ffffff"
                   />
-                  <Text style={styles.installBtnText}>
-                    {isPreview
-                      ? previewDone
-                        ? 'Przetestuj ponownie'
-                        : 'Pobierz i zainstaluj'
-                      : hasApkAsset
-                        ? 'Pobierz i zainstaluj'
-                        : 'Otwórz stronę wydania'}
-                  </Text>
+                  <Text style={styles.installBtnText}>{primaryButtonLabel}</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -344,11 +400,14 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderWidth: 1,
     borderColor: '#1e293b',
+    gap: 8,
   },
   versionPills: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    flexWrap: 'wrap',
+    flex: 1,
+    gap: 6,
   },
   currentVerBadge: {
     backgroundColor: '#1e293b',
@@ -375,6 +434,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     color: '#34d399',
+  },
+  betaBadge: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+  },
+  betaBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#fbbf24',
+    letterSpacing: 0.4,
   },
   sizeBadge: {
     flexDirection: 'row',
@@ -410,6 +483,23 @@ const styles = StyleSheet.create({
     fontSize: 13.5,
     lineHeight: 20,
     color: '#e2e8f0',
+  },
+  iosHintBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(56, 189, 248, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.28)',
+    borderRadius: 12,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+  },
+  iosHintText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#cbd5e1',
   },
   progressBox: {
     gap: 8,
