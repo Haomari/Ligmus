@@ -21,7 +21,8 @@ interface TimeGridProps {
   isToday: boolean;
   isRefreshing: boolean;
   onRefresh: () => void;
-  onPressLesson: (lesson: TimetableLesson, index: number) => void;
+  onPressLesson: (day: DaySchedule, lesson: TimetableLesson, index: number) => void;
+  onLongPressLesson?: (day: DaySchedule, lesson: TimetableLesson, index: number) => void;
 }
 
 export const TimeGrid: React.FC<TimeGridProps> = ({
@@ -30,6 +31,7 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
   isRefreshing,
   onRefresh,
   onPressLesson,
+  onLongPressLesson,
 }) => {
   const scrollRef = useRef<ScrollView>(null);
   const didAutoScrollRef = useRef(false);
@@ -92,6 +94,39 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
       gridEndMin: roundedEnd,
       hours: hrs,
     };
+  }, [day.lessons]);
+
+  const layoutColumns = useMemo(() => {
+    const items = (day.lessons || []).map((lesson, idx) => {
+      const startMin = parseHM(
+        lesson.startTime || lesson.timeSpan.split('-')[0] || '08:00'
+      );
+      const endMin = parseHM(
+        lesson.endTime || lesson.timeSpan.split('-')[1] || '08:45'
+      );
+      return {
+        idx,
+        startMin,
+        endMin: Math.max(endMin, startMin + 30),
+        columnIndex: 0,
+        columnCount: 1,
+      };
+    });
+
+    for (let i = 0; i < items.length; i++) {
+      const overlapping = items.filter(
+        (other) =>
+          other.startMin < items[i].endMin && other.endMin > items[i].startMin
+      );
+      if (overlapping.length > 1) {
+        overlapping.forEach((entry, colIdx) => {
+          entry.columnIndex = colIdx;
+          entry.columnCount = overlapping.length;
+        });
+      }
+    }
+
+    return items;
   }, [day.lessons]);
 
   const totalGridHeight = (gridEndMin - gridStartMin) * PX_PER_MIN;
@@ -167,12 +202,13 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
         {/* Lessons track */}
         <View style={styles.cardsTrack}>
           {day.lessons.map((lesson, index) => {
-            const startMin = parseHM(
-              lesson.startTime || lesson.timeSpan.split('-')[0] || '08:00'
-            );
-            const endMin = parseHM(
-              lesson.endTime || lesson.timeSpan.split('-')[1] || '08:45'
-            );
+            const colInfo = layoutColumns[index];
+            const startMin =
+              colInfo?.startMin ??
+              parseHM(lesson.startTime || lesson.timeSpan.split('-')[0] || '08:00');
+            const endMin =
+              colInfo?.endMin ??
+              parseHM(lesson.endTime || lesson.timeSpan.split('-')[1] || '08:45');
             const duration = Math.max(endMin - startMin, 30);
             const top = Math.max(0, (startMin - gridStartMin) * PX_PER_MIN);
             const height = duration * PX_PER_MIN;
@@ -183,7 +219,14 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
                 lesson={lesson}
                 top={top}
                 height={height}
-                onPress={() => onPressLesson(lesson, index)}
+                columnIndex={colInfo?.columnIndex ?? 0}
+                columnCount={colInfo?.columnCount ?? 1}
+                onPress={() => onPressLesson(day, lesson, index)}
+                onLongPress={
+                  onLongPressLesson
+                    ? () => onLongPressLesson(day, lesson, index)
+                    : undefined
+                }
               />
             );
           })}

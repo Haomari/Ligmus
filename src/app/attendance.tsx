@@ -730,11 +730,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   filterSection: {
-    marginHorizontal: -18,
+    overflow: 'hidden',
   },
   chipsScroll: {
-    paddingHorizontal: 18,
     gap: 8,
+    paddingRight: 4,
   },
   filterChip: {
     flexDirection: 'row',

@@ -1,7 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  Dimensions,
   FlatList,
+  Modal,
+  Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -15,7 +20,8 @@ import { useLibrus } from '@/context/LibrusContext';
 import {
   LibrusMessageDetail,
   LibrusMessageSummary,
-  MessageFolder,
+  SchoolAnnouncement,
+  SkrzynkaTab,
 } from '@/types/librus';
 import { getSentExcuseDates } from '@/services/fileCache';
 import { cleanLibrusPersonName } from '@/services/librusClient';
@@ -41,17 +47,27 @@ function normalizeSubjectKey(raw?: string): string {
 
 export default function MessagesScreen() {
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ autoExcuse?: string }>();
+  const params = useLocalSearchParams<{
+    autoExcuse?: string;
+    tab?: string;
+    announcementId?: string;
+    messageId?: string;
+  }>();
   const {
     inboxMessages,
     sentMessages,
+    announcements,
     unreadMessagesCount,
+    unreadAnnouncementsCount,
     attendanceMarks,
     loadMessages,
+    loadAnnouncements,
     markMessageAsReadLocal,
+    markAnnouncementAsReadLocal,
+    markAllAnnouncementsReadLocal,
   } = useLibrus();
 
-  const [folder, setFolder] = useState<MessageFolder>('inbox');
+  const [tab, setTab] = useState<SkrzynkaTab>('inbox');
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -59,33 +75,168 @@ export default function MessagesScreen() {
     useState<LibrusMessageSummary | null>(null);
   const [detailsVisible, setDetailsVisible] = useState(false);
 
+  const [selectedAnnouncement, setSelectedAnnouncement] =
+    useState<SchoolAnnouncement | null>(null);
+
   const [composeVisible, setComposeVisible] = useState(false);
   const [composeMode, setComposeMode] = useState<ComposeMode>('compose');
   const [replyDetail, setReplyDetail] = useState<LibrusMessageDetail | null>(
     null
   );
 
-  useEffect(() => {
-    loadMessages('inbox');
-    loadMessages('sent');
-  }, []);
+  // Pull-down responder state for Announcement reader modal
+  const [annSheetTranslateY] = useState(
+    () => new Animated.Value(Dimensions.get('window').height)
+  );
+  const [annBackdropOpacity] = useState(() => new Animated.Value(0));
+  const annScrollYRef = useRef(0);
+  const annGestureStartRef = useRef({ x: 0, y: 0 });
+  const annClosingRef = useRef(false);
+
+  const handledExcuseRef = useRef<string | null>(null);
+  const handledLinkKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    loadMessages(folder);
-  }, [folder]);
+    void loadMessages('inbox');
+    void loadMessages('sent');
+    void loadAnnouncements();
+  }, [loadMessages, loadAnnouncements]);
 
   useEffect(() => {
-    if (params.autoExcuse === '1') {
-      setComposeMode('excuse');
-      setReplyDetail(null);
-      setComposeVisible(true);
+    if (tab === 'announcements') {
+      void loadAnnouncements();
+    } else {
+      void loadMessages(tab);
+    }
+  }, [tab, loadMessages, loadAnnouncements]);
+
+  useEffect(() => {
+    if (params.autoExcuse === '1' && handledExcuseRef.current !== '1') {
+      handledExcuseRef.current = '1';
+      Promise.resolve().then(() => {
+        setComposeMode('excuse');
+        setReplyDetail(null);
+        setComposeVisible(true);
+      });
+    } else if (params.autoExcuse !== '1') {
+      handledExcuseRef.current = null;
     }
   }, [params.autoExcuse]);
+
+  const openAnnouncementModal = useCallback(
+    (ann: SchoolAnnouncement) => {
+      markAnnouncementAsReadLocal(ann.id);
+      annClosingRef.current = false;
+      annScrollYRef.current = 0;
+      const winH = Dimensions.get('window').height;
+      annSheetTranslateY.setValue(winH);
+      annBackdropOpacity.setValue(0);
+      setSelectedAnnouncement({ ...ann, isUnread: false });
+
+      Animated.parallel([
+        Animated.timing(annBackdropOpacity, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+        Animated.spring(annSheetTranslateY, {
+          toValue: 0,
+          damping: 24,
+          stiffness: 240,
+          mass: 0.85,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    },
+    [annBackdropOpacity, annSheetTranslateY, markAnnouncementAsReadLocal]
+  );
+
+  const closeAnnouncementModal = useCallback(() => {
+    if (annClosingRef.current) return;
+    annClosingRef.current = true;
+    const winH = Dimensions.get('window').height;
+    Animated.parallel([
+      Animated.timing(annBackdropOpacity, {
+        toValue: 0,
+        duration: 170,
+        useNativeDriver: true,
+      }),
+      Animated.timing(annSheetTranslateY, {
+        toValue: winH,
+        duration: 200,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      annClosingRef.current = false;
+      setSelectedAnnouncement(null);
+    });
+  }, [annBackdropOpacity, annSheetTranslateY]);
+
+  // Handle deep-linking from "Ostatnia aktywność" (?tab=announcements&announcementId=... or ?tab=inbox&messageId=...)
+  useEffect(() => {
+    const requestedTab = typeof params.tab === 'string' ? params.tab : '';
+    const annId = typeof params.announcementId === 'string' ? params.announcementId : '';
+    const msgId = typeof params.messageId === 'string' ? params.messageId : '';
+
+    if (!requestedTab && !annId && !msgId) return;
+
+    const linkKey = `${requestedTab}|${annId}|${msgId}`;
+    if (handledLinkKeyRef.current === linkKey) return;
+
+    if (annId) {
+      const targetAnn = announcements.find((a) => a.id === annId);
+      if (!targetAnn) {
+        Promise.resolve().then(() => setTab('announcements'));
+        return;
+      }
+      handledLinkKeyRef.current = linkKey;
+      Promise.resolve().then(() => {
+        setTab('announcements');
+        openAnnouncementModal(targetAnn);
+      });
+      return;
+    }
+
+    if (msgId) {
+      const targetMsg = inboxMessages.find((m) => m.id === msgId);
+      if (!targetMsg) {
+        Promise.resolve().then(() => setTab('inbox'));
+        return;
+      }
+      handledLinkKeyRef.current = linkKey;
+      Promise.resolve().then(() => {
+        setTab('inbox');
+        setSelectedMessage(targetMsg);
+        setDetailsVisible(true);
+      });
+      return;
+    }
+
+    if (
+      requestedTab === 'inbox' ||
+      requestedTab === 'sent' ||
+      requestedTab === 'announcements'
+    ) {
+      handledLinkKeyRef.current = linkKey;
+      Promise.resolve().then(() => setTab(requestedTab));
+    }
+  }, [
+    params.tab,
+    params.announcementId,
+    params.messageId,
+    announcements,
+    inboxMessages,
+    openAnnouncementModal,
+  ]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      await Promise.all([loadMessages('inbox'), loadMessages('sent')]);
+      await Promise.all([
+        loadMessages('inbox'),
+        loadMessages('sent'),
+        loadAnnouncements(),
+      ]);
     } finally {
       setRefreshing(false);
     }
@@ -99,7 +250,6 @@ export default function MessagesScreen() {
       const msgDate = msg.date || msg.sentAt || '';
 
       if (msg.folderId === 6) {
-        // Sent message: check if inbox has a message from the same person with a newer date or Re: subject
         return inboxMessages.some((inb) => {
           const inbPerson = normalizePersonKey(inb.sender);
           const inbSubj = normalizeSubjectKey(inb.subject);
@@ -118,7 +268,6 @@ export default function MessagesScreen() {
           return false;
         });
       } else {
-        // Inbox message: check if sentMessages has a message to the same person with a newer date or Re: subject
         return sentMessages.some((snt) => {
           const sntPerson = normalizePersonKey(snt.sender);
           const sntSubj = normalizeSubjectKey(snt.subject);
@@ -151,22 +300,33 @@ export default function MessagesScreen() {
       }
     }
     return dates.size;
-  }, [attendanceMarks, composeVisible]);
+  }, [attendanceMarks]);
 
-  const activeList = folder === 'inbox' ? inboxMessages : sentMessages;
+  const activeMessageList = tab === 'sent' ? sentMessages : inboxMessages;
 
   const filteredMessages = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return activeList;
-    return activeList.filter((m) => {
+    if (!q) return activeMessageList;
+    return activeMessageList.filter((m) => {
       const person =
-        folder === 'sent' ? m.senderOrRecipient || m.sender : m.sender;
+        tab === 'sent' ? m.senderOrRecipient || m.sender : m.sender;
       return (
         m.subject.toLowerCase().includes(q) ||
         cleanLibrusPersonName(person).toLowerCase().includes(q)
       );
     });
-  }, [activeList, searchQuery, folder]);
+  }, [activeMessageList, searchQuery, tab]);
+
+  const filteredAnnouncements = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return announcements;
+    return announcements.filter(
+      (a) =>
+        a.title.toLowerCase().includes(q) ||
+        a.author.toLowerCase().includes(q) ||
+        a.content.toLowerCase().includes(q)
+    );
+  }, [announcements, searchQuery]);
 
   const openExcuseGenerator = () => {
     setComposeMode('excuse');
@@ -186,10 +346,19 @@ export default function MessagesScreen() {
       <View style={styles.header}>
         <View style={styles.headerTopRow}>
           <Text style={styles.headerTitle} numberOfLines={1}>
-            Wiadomości
+            Skrzynka
           </Text>
 
           <View style={styles.headerActions}>
+            {tab === 'announcements' && unreadAnnouncementsCount > 0 && (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={markAllAnnouncementsReadLocal}
+                style={styles.markAllReadBtn}>
+                <Ionicons name="checkmark-done-outline" size={18} color="#818cf8" />
+              </TouchableOpacity>
+            )}
+
             <TouchableOpacity
               activeOpacity={0.85}
               onPress={openExcuseGenerator}
@@ -213,21 +382,22 @@ export default function MessagesScreen() {
           </View>
         </View>
 
-        {/* Folder Switcher (Odebrane / Wysłane) */}
+        {/* 3-Tab Switcher (Odebrane | Wysłane | Ogłoszenia) */}
         <View style={styles.folderBar}>
           <TouchableOpacity
             activeOpacity={0.85}
-            onPress={() => setFolder('inbox')}
+            onPress={() => setTab('inbox')}
             style={[
               styles.folderTab,
-              folder === 'inbox' && styles.folderTabActive,
+              tab === 'inbox' && styles.folderTabActive,
             ]}>
             <Text
+              numberOfLines={1}
               style={[
                 styles.folderTabText,
-                folder === 'inbox' && styles.folderTabTextActive,
+                tab === 'inbox' && styles.folderTabTextActive,
               ]}>
-              Odebrane ({inboxMessages.length})
+              Odebrane
             </Text>
             {unreadMessagesCount > 0 && (
               <View style={styles.unreadPill}>
@@ -238,18 +408,43 @@ export default function MessagesScreen() {
 
           <TouchableOpacity
             activeOpacity={0.85}
-            onPress={() => setFolder('sent')}
+            onPress={() => setTab('sent')}
             style={[
               styles.folderTab,
-              folder === 'sent' && styles.folderTabActive,
+              tab === 'sent' && styles.folderTabActive,
             ]}>
             <Text
+              numberOfLines={1}
               style={[
                 styles.folderTabText,
-                folder === 'sent' && styles.folderTabTextActive,
+                tab === 'sent' && styles.folderTabTextActive,
               ]}>
-              Wysłane ({sentMessages.length})
+              Wysłane
             </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => setTab('announcements')}
+            style={[
+              styles.folderTab,
+              tab === 'announcements' && styles.folderTabActive,
+            ]}>
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.folderTabText,
+                tab === 'announcements' && styles.folderTabTextActive,
+              ]}>
+              Ogłoszenia
+            </Text>
+            {unreadAnnouncementsCount > 0 && (
+              <View style={styles.unreadAnnouncementPill}>
+                <Text style={styles.unreadPillText}>
+                  {unreadAnnouncementsCount}
+                </Text>
+              </View>
+            )}
           </TouchableOpacity>
         </View>
 
@@ -259,7 +454,11 @@ export default function MessagesScreen() {
           <TextInput
             value={searchQuery}
             onChangeText={setSearchQuery}
-            placeholder="Szukaj po temacie lub osobie..."
+            placeholder={
+              tab === 'announcements'
+                ? 'Szukaj w ogłoszeniach...'
+                : 'Szukaj po temacie lub osobie...'
+            }
             placeholderTextColor="#64748b"
             style={styles.searchInput}
           />
@@ -271,155 +470,228 @@ export default function MessagesScreen() {
         </View>
       </View>
 
-      <FlatList
-        data={filteredMessages}
-        keyExtractor={(item) => `${item.folderId}-${item.id}`}
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingBottom: Math.max(insets.bottom + 24, 40) },
-        ]}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor="#3b82f6"
-          />
-        }
-        ListEmptyComponent={
-          <View style={styles.emptyBox}>
-            <Ionicons name="mail-open-outline" size={34} color="#64748b" />
-            <Text style={styles.emptyTitle}>Brak wiadomości</Text>
-            <Text style={styles.emptySub}>
-              Pociągnij w dół, aby odświeżyć skrzynkę z Librusa Synergia.
-            </Text>
-          </View>
-        }
-        renderItem={({ item }) => {
-          const rawPerson =
-            folder === 'sent'
-              ? item.senderOrRecipient || item.sender
-              : item.sender;
-          const displayPerson = cleanLibrusPersonName(rawPerson) || rawPerson;
-          const hasReply = checkHasReply(item);
-
-          const isUnread = folder === 'inbox' && item.isUnread;
-          const isReadSent =
-            item.readByRecipient !== undefined
-              ? item.readByRecipient
-              : Boolean(item.readAt && !/^nie\b/i.test(item.readAt));
-
-          return (
-            <TouchableOpacity
-              activeOpacity={0.82}
-              onPress={() => {
-                setSelectedMessage(item);
-                setDetailsVisible(true);
-              }}
-              style={[
-                styles.messageCard,
-                isUnread && styles.messageCardUnread,
-              ]}>
-              {/* Top row: Subject (bold large) + Date */}
-              <View style={styles.cardTopRow}>
-                <Text
-                  style={[
-                    styles.subjectText,
-                    isUnread && styles.subjectTextUnread,
-                  ]}
-                  numberOfLines={2}>
-                  {item.subject || '(Brak tematu)'}
-                </Text>
-                <Text style={styles.dateText}>{item.sentAt}</Text>
-              </View>
-
-              {/* Second row: Sender / Recipient */}
-              <View style={styles.personRow}>
-                <Ionicons
-                  name={
-                    item.folderId === 6
-                      ? 'paper-plane-outline'
-                      : 'person-outline'
-                  }
-                  size={14}
-                  color="#38bdf8"
-                />
-                <Text style={styles.personLabel}>
-                  {item.folderId === 6 ? 'Do:' : 'Od:'}
-                </Text>
-                <Text style={styles.personValue} numberOfLines={1}>
-                  {displayPerson}
-                </Text>
-              </View>
-
-              {/* Third row: Badges (Załącznik, Read status, Reply status) */}
-              <View style={styles.badgeRow}>
-                {item.hasAttachment && (
-                  <View style={[styles.badge, styles.badgeAttachment]}>
-                    <Ionicons name="attach" size={13} color="#38bdf8" />
-                    <Text style={styles.badgeAttachmentText}>Załącznik</Text>
-                  </View>
-                )}
-
-                {folder === 'sent' ? (
-                  <View
+      {tab === 'announcements' ? (
+        <FlatList
+          data={filteredAnnouncements}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          ]}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor="#3b82f6"
+            />
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyBox}>
+              <Ionicons name="megaphone-outline" size={34} color="#64748b" />
+              <Text style={styles.emptyTitle}>Brak ogłoszeń szkolnych</Text>
+              <Text style={styles.emptySub}>
+                Pociągnij w dół, aby odświeżyć tablicę ogłoszeń z Librusa Synergia.
+              </Text>
+            </View>
+          }
+          renderItem={({ item }) => {
+            const isUnread = Boolean(item.isUnread);
+            const preview = item.content.replace(/\s+/g, ' ').trim();
+            return (
+              <TouchableOpacity
+                activeOpacity={0.82}
+                onPress={() => openAnnouncementModal(item)}
+                style={[
+                  styles.messageCard,
+                  isUnread && styles.announcementCardUnread,
+                ]}>
+                <View style={styles.cardTopRow}>
+                  <Text
                     style={[
-                      styles.badge,
-                      isReadSent ? styles.badgeRead : styles.badgeUnread,
-                    ]}>
-                    <Ionicons
-                      name={
-                        isReadSent
-                          ? 'checkmark-done-outline'
-                          : 'time-outline'
-                      }
-                      size={13}
-                      color={isReadSent ? '#34d399' : '#fbbf24'}
-                    />
-                    <Text
-                      style={
-                        isReadSent
-                          ? styles.badgeReadText
-                          : styles.badgeUnreadText
-                      }>
-                      {isReadSent ? 'Przeczytano' : 'Nieprzeczytano'}
-                    </Text>
-                  </View>
-                ) : isUnread ? (
-                  <View style={[styles.badge, styles.badgeUnread]}>
-                    <Ionicons name="mail-unread-outline" size={13} color="#fbbf24" />
-                    <Text style={styles.badgeUnreadText}>Nieprzeczytano</Text>
-                  </View>
-                ) : (
-                  <View style={[styles.badge, styles.badgeRead]}>
-                    <Ionicons
-                      name="checkmark-done-outline"
-                      size={13}
-                      color="#34d399"
-                    />
-                    <Text style={styles.badgeReadText}>Przeczytano</Text>
-                  </View>
-                )}
+                      styles.subjectText,
+                      isUnread && styles.subjectTextUnread,
+                    ]}
+                    numberOfLines={2}>
+                    {item.title}
+                  </Text>
+                  <Text style={styles.dateText}>{item.date}</Text>
+                </View>
 
-                {hasReply && (
-                  <View style={[styles.badge, styles.badgeReply]}>
-                    <Ionicons
-                      name="return-down-forward-outline"
-                      size={13}
-                      color="#60a5fa"
-                    />
-                    <Text style={styles.badgeReplyText}>
-                      {folder === 'sent'
-                        ? 'Otrzymano odpowiedź'
-                        : 'Odpowiedziano'}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            </TouchableOpacity>
-          );
-        }}
-      />
+                <View style={styles.personRow}>
+                  <Ionicons name="megaphone-outline" size={14} color="#818cf8" />
+                  <Text style={styles.personLabel}>Dodał:</Text>
+                  <Text style={[styles.personValue, { color: '#a5b4fc' }]} numberOfLines={1}>
+                    {item.author}
+                  </Text>
+                  {isUnread && (
+                    <View style={[styles.badge, styles.badgeNewAnn]}>
+                      <Text style={styles.badgeNewAnnText}>Nowe</Text>
+                    </View>
+                  )}
+                </View>
 
+                {preview.length > 0 && (
+                  <Text style={styles.announcementPreview} numberOfLines={2}>
+                    {preview}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            );
+          }}
+        />
+      ) : (
+        <FlatList
+          data={filteredMessages}
+          keyExtractor={(item) => `${item.folderId}-${item.id}`}
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          ]}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor="#3b82f6"
+            />
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyBox}>
+              <Ionicons name="mail-open-outline" size={34} color="#64748b" />
+              <Text style={styles.emptyTitle}>Brak wiadomości</Text>
+              <Text style={styles.emptySub}>
+                Pociągnij w dół, aby odświeżyć skrzynkę z Librusa Synergia.
+              </Text>
+            </View>
+          }
+          renderItem={({ item }) => {
+            const rawPerson =
+              tab === 'sent'
+                ? item.senderOrRecipient || item.sender
+                : item.sender;
+            const displayPerson = cleanLibrusPersonName(rawPerson) || rawPerson;
+            const hasReply = checkHasReply(item);
+
+            const isUnread = tab === 'inbox' && item.isUnread;
+            const isReadSent =
+              item.readByRecipient !== undefined
+                ? item.readByRecipient
+                : Boolean(item.readAt && !/^nie\b/i.test(item.readAt));
+
+            return (
+              <TouchableOpacity
+                activeOpacity={0.82}
+                onPress={() => {
+                  setSelectedMessage(item);
+                  setDetailsVisible(true);
+                }}
+                style={[
+                  styles.messageCard,
+                  isUnread && styles.messageCardUnread,
+                ]}>
+                <View style={styles.cardTopRow}>
+                  <Text
+                    style={[
+                      styles.subjectText,
+                      isUnread && styles.subjectTextUnread,
+                    ]}
+                    numberOfLines={2}>
+                    {item.subject || '(Brak tematu)'}
+                  </Text>
+                  <Text style={styles.dateText}>{item.sentAt}</Text>
+                </View>
+
+                <View style={styles.personRow}>
+                  <Ionicons
+                    name={
+                      item.folderId === 6
+                        ? 'paper-plane-outline'
+                        : 'person-outline'
+                    }
+                    size={14}
+                    color="#38bdf8"
+                  />
+                  <Text style={styles.personLabel}>
+                    {item.folderId === 6 ? 'Do:' : 'Od:'}
+                  </Text>
+                  <Text style={styles.personValue} numberOfLines={1}>
+                    {displayPerson}
+                  </Text>
+                </View>
+
+                <View style={styles.badgeRow}>
+                  {item.hasAttachment && (
+                    <View style={[styles.badge, styles.badgeAttachment]}>
+                      <Ionicons name="attach" size={13} color="#38bdf8" />
+                      <Text style={styles.badgeAttachmentText}>Załącznik</Text>
+                    </View>
+                  )}
+
+                  {tab === 'sent' ? (
+                    <View
+                      style={[
+                        styles.badge,
+                        isReadSent ? styles.badgeRead : styles.badgeUnread,
+                      ]}>
+                      <Ionicons
+                        name={
+                          isReadSent
+                            ? 'checkmark-done-outline'
+                            : 'time-outline'
+                        }
+                        size={13}
+                        color={isReadSent ? '#34d399' : '#fbbf24'}
+                      />
+                      <Text
+                        style={
+                          isReadSent
+                            ? styles.badgeReadText
+                            : styles.badgeUnreadText
+                        }>
+                        {isReadSent ? 'Przeczytano' : 'Nieprzeczytano'}
+                      </Text>
+                    </View>
+                  ) : isUnread ? (
+                    <View style={[styles.badge, styles.badgeUnread]}>
+                      <Ionicons
+                        name="mail-unread-outline"
+                        size={13}
+                        color="#fbbf24"
+                      />
+                      <Text style={styles.badgeUnreadText}>Nieprzeczytano</Text>
+                    </View>
+                  ) : (
+                    <View style={[styles.badge, styles.badgeRead]}>
+                      <Ionicons
+                        name="checkmark-done-outline"
+                        size={13}
+                        color="#34d399"
+                      />
+                      <Text style={styles.badgeReadText}>Przeczytano</Text>
+                    </View>
+                  )}
+
+                  {hasReply && (
+                    <View style={[styles.badge, styles.badgeReply]}>
+                      <Ionicons
+                        name="return-down-forward-outline"
+                        size={13}
+                        color="#60a5fa"
+                      />
+                      <Text style={styles.badgeReplyText}>
+                        {tab === 'sent'
+                          ? 'Otrzymano odpowiedź'
+                          : 'Odpowiedziano'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+            );
+          }}
+        />
+      )}
+
+      {/* Message Detail Modal */}
       <MessageDetailsModal
         message={selectedMessage}
         hasReply={selectedMessage ? checkHasReply(selectedMessage) : false}
@@ -436,15 +708,137 @@ export default function MessagesScreen() {
         }}
       />
 
+      {/* Compose / Auto-Excuse Modal */}
       <MessageComposeModal
         visible={composeVisible}
         mode={composeMode}
         replyToMessage={replyDetail}
         onClose={() => setComposeVisible(false)}
         onSentSuccess={() => {
-          loadMessages('sent');
+          void loadMessages('sent');
         }}
       />
+
+      {/* School Announcement Detail Modal */}
+      <Modal
+        visible={Boolean(selectedAnnouncement)}
+        transparent
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={closeAnnouncementModal}>
+        <View style={styles.annModalOverlay}>
+          <Animated.View
+            style={[styles.annModalBackdrop, { opacity: annBackdropOpacity }]}>
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={closeAnnouncementModal}
+            />
+          </Animated.View>
+
+          {selectedAnnouncement && (
+            <Animated.View
+              style={[
+                styles.annModalSheet,
+                {
+                  marginTop: Math.max(insets.top + 24, 48),
+                  paddingBottom: Math.max(insets.bottom + 18, 26),
+                  transform: [{ translateY: annSheetTranslateY }],
+                },
+              ]}
+              onStartShouldSetResponderCapture={(e) => {
+                annGestureStartRef.current = {
+                  x: e.nativeEvent.pageX,
+                  y: e.nativeEvent.pageY,
+                };
+                return false;
+              }}
+              onMoveShouldSetResponderCapture={(e) => {
+                const dx = e.nativeEvent.pageX - annGestureStartRef.current.x;
+                const dy = e.nativeEvent.pageY - annGestureStartRef.current.y;
+                return (
+                  dy > 12 &&
+                  dy > Math.abs(dx) * 1.35 &&
+                  annScrollYRef.current <= 2
+                );
+              }}
+              onResponderMove={(e) => {
+                const dy = e.nativeEvent.pageY - annGestureStartRef.current.y;
+                if (dy > 0) {
+                  annSheetTranslateY.setValue(dy);
+                }
+              }}
+              onResponderRelease={(e) => {
+                const dy = e.nativeEvent.pageY - annGestureStartRef.current.y;
+                if (dy > 95) {
+                  closeAnnouncementModal();
+                } else {
+                  Animated.spring(annSheetTranslateY, {
+                    toValue: 0,
+                    useNativeDriver: true,
+                    bounciness: 5,
+                  }).start();
+                }
+              }}
+              onResponderTerminate={() => {
+                Animated.spring(annSheetTranslateY, {
+                  toValue: 0,
+                  useNativeDriver: true,
+                }).start();
+              }}>
+              <View style={styles.annHandleWrap}>
+                <View style={styles.annHandlePill} />
+              </View>
+
+              <View style={styles.annModalHeader}>
+                <View style={styles.annHeaderTextCol}>
+                  <View style={styles.annCategoryRow}>
+                    <Ionicons name="megaphone" size={14} color="#818cf8" />
+                    <Text style={styles.annCategoryText}>Ogłoszenie szkolne</Text>
+                  </View>
+                  <Text style={styles.annModalTitle}>
+                    {selectedAnnouncement.title}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={closeAnnouncementModal}
+                  style={styles.annCloseBtn}>
+                  <Ionicons name="close" size={20} color="#cbd5e1" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.annMetaBox}>
+                <View style={styles.annMetaItem}>
+                  <Ionicons name="person-outline" size={14} color="#94a3b8" />
+                  <Text style={styles.annMetaText}>
+                    {selectedAnnouncement.author}
+                  </Text>
+                </View>
+                <View style={styles.annMetaItem}>
+                  <Ionicons name="calendar-outline" size={14} color="#94a3b8" />
+                  <Text style={styles.annMetaText}>
+                    {selectedAnnouncement.date}
+                  </Text>
+                </View>
+              </View>
+
+              <ScrollView
+                style={styles.annBodyScroll}
+                contentContainerStyle={styles.annBodyContent}
+                showsVerticalScrollIndicator={false}
+                scrollEventThrottle={16}
+                onScroll={(e) => {
+                  annScrollYRef.current = e.nativeEvent.contentOffset.y;
+                }}>
+                <Text selectable style={styles.annBodyText}>
+                  {selectedAnnouncement.content}
+                </Text>
+              </ScrollView>
+            </Animated.View>
+          )}
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -477,7 +871,17 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
+  },
+  markAllReadBtn: {
+    width: 40,
+    height: 42,
+    borderRadius: 13,
+    backgroundColor: 'rgba(129, 140, 248, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(129, 140, 248, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   excuseBtn: {
     flexDirection: 'row',
@@ -521,14 +925,16 @@ const styles = StyleSheet.create({
     padding: 3,
     borderWidth: 1,
     borderColor: '#334155',
+    gap: 2,
   },
   folderTab: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
     paddingVertical: 7,
+    paddingHorizontal: 4,
     borderRadius: 9,
   },
   folderTabActive: {
@@ -545,7 +951,13 @@ const styles = StyleSheet.create({
   },
   unreadPill: {
     backgroundColor: '#ef4444',
-    paddingHorizontal: 6,
+    paddingHorizontal: 5.5,
+    paddingVertical: 1,
+    borderRadius: 999,
+  },
+  unreadAnnouncementPill: {
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 5.5,
     paddingVertical: 1,
     borderRadius: 999,
   },
@@ -586,6 +998,15 @@ const styles = StyleSheet.create({
   messageCardUnread: {
     backgroundColor: 'rgba(30, 58, 138, 0.35)',
     borderColor: 'rgba(59, 130, 246, 0.6)',
+  },
+  announcementCardUnread: {
+    backgroundColor: 'rgba(49, 46, 129, 0.32)',
+    borderColor: 'rgba(129, 140, 248, 0.6)',
+  },
+  announcementPreview: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    lineHeight: 19,
   },
   cardTopRow: {
     flexDirection: 'row',
@@ -676,6 +1097,15 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
+  badgeNewAnn: {
+    backgroundColor: 'rgba(129, 140, 248, 0.18)',
+    borderColor: 'rgba(129, 140, 248, 0.5)',
+  },
+  badgeNewAnnText: {
+    color: '#a5b4fc',
+    fontSize: 10.5,
+    fontWeight: '800',
+  },
   emptyBox: {
     backgroundColor: '#1e293b',
     borderRadius: 16,
@@ -695,5 +1125,107 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     fontSize: 12,
     textAlign: 'center',
+  },
+  annModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  annModalBackdrop: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(2, 6, 23, 0.78)',
+  },
+  annModalSheet: {
+    maxHeight: '88%',
+    backgroundColor: '#0f172a',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
+    borderColor: '#334155',
+    overflow: 'hidden',
+  },
+  annHandleWrap: {
+    alignItems: 'center',
+    paddingTop: 10,
+    paddingBottom: 6,
+  },
+  annHandlePill: {
+    width: 42,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#475569',
+  },
+  annModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+    gap: 12,
+  },
+  annHeaderTextCol: {
+    flex: 1,
+    gap: 4,
+  },
+  annCategoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  annCategoryText: {
+    color: '#818cf8',
+    fontSize: 11.5,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  annModalTitle: {
+    color: '#f8fafc',
+    fontSize: 19,
+    fontWeight: '800',
+    lineHeight: 25,
+  },
+  annCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  annMetaBox: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    marginHorizontal: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  annMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  annMetaText: {
+    color: '#cbd5e1',
+    fontSize: 12.5,
+    fontWeight: '600',
+  },
+  annBodyScroll: {
+    marginTop: 12,
+  },
+  annBodyContent: {
+    paddingHorizontal: 18,
+    paddingBottom: 16,
+  },
+  annBodyText: {
+    color: '#e2e8f0',
+    fontSize: 15,
+    lineHeight: 23,
   },
 });

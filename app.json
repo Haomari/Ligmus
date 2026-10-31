@@ -2,14 +2,14 @@
   "expo": {
     "name": "Ligmus",
     "slug": "Ligmus",
-    "version": "1.1.0-beta.1",
+    "version": "1.1.0-beta.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "ligmus",
     "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "com.haomari.ligmus",
-      "buildNumber": "3",
+      "buildNumber": "4",
       "supportsTablet": true,
       "icon": "./assets/images/icon.png",
       "infoPlist": {
@@ -30,7 +30,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.anonymous.Ligmus",
-      "versionCode": 3,
+      "versionCode": 4,
       "permissions": [
         "NOTIFICATIONS",
         "POST_NOTIFICATIONS",

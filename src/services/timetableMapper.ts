@@ -170,7 +170,9 @@ export function mergeAttendanceAndTopics(
 
       return {
         ...day,
-        lessons: day.lessons.map((lesson, lessonIdx) => {
+        lessons: day.lessons
+          .filter((l) => !l.isStandaloneEvent)
+          .map((lesson, lessonIdx) => {
           const keyHour = `${day.date}#${lesson.hourNumber}`;
           const keySubj = `${day.date}#${lesson.subject.trim().toLowerCase()}`;
 
@@ -328,17 +330,18 @@ export function computeStats(
 
       for (const wk of Object.values(cachedWeeks)) {
         wk.days.forEach((d, idx) => {
+          const regLessons = d.lessons.filter((l) => !l.isStandaloneEvent);
           if (idx >= 0 && idx < 5) {
-            if (d.lessons.length > weekdayCounts[idx]) {
-              weekdayCounts[idx] = d.lessons.length;
+            if (regLessons.length > weekdayCounts[idx]) {
+              weekdayCounts[idx] = regLessons.length;
             }
           }
           if (!d.date) return;
           if (d.date < todayIso) {
-            const activeCount = d.lessons.filter((l) => !l.isCancelled).length;
+            const activeCount = regLessons.filter((l) => !l.isCancelled).length;
             exactDateCounts.set(d.date, activeCount);
           } else if (d.date === todayIso) {
-            const completedToday = d.lessons.filter(
+            const completedToday = regLessons.filter(
               (l) => !l.isCancelled && parseHM(l.endTime || '23:59') <= nowMin
             ).length;
             exactDateCounts.set(d.date, completedToday);
@@ -521,7 +524,8 @@ export function computeDetailedAttendance(
   for (const wk of Object.values(effectiveWeeks)) {
     if (!wk?.days) continue;
     wk.days.forEach((d, idx) => {
-      const nonCancelledSubjects = d.lessons
+      const regLessons = d.lessons.filter((l) => !l.isStandaloneEvent);
+      const nonCancelledSubjects = regLessons
         .filter((l) => !l.isCancelled && l.subject)
         .map((l) => registerSubject(l.subject)!)
         .filter(Boolean);
@@ -529,7 +533,7 @@ export function computeDetailedAttendance(
       if (idx >= 0 && idx < 5) {
         const isPastOrToday = Boolean(d.date && d.date <= todayIso);
         const dayMap = slotSubjectScores[idx];
-        for (const l of d.lessons) {
+        for (const l of regLessons) {
           const baseSubj = registerSubject(l.original?.subject || l.subject);
           if (!baseSubj) continue;
           const hr = l.hourNumber ?? 0;
@@ -547,7 +551,7 @@ export function computeDetailedAttendance(
       if (d.date < todayIso) {
         exactDateSubjects.set(d.date, nonCancelledSubjects);
       } else if (d.date === todayIso) {
-        const completedToday = d.lessons
+        const completedToday = regLessons
           .filter((l) => !l.isCancelled && l.subject && parseHM(l.endTime || '23:59') <= nowMin)
           .map((l) => registerSubject(l.subject)!)
           .filter(Boolean);

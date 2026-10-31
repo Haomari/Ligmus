@@ -1,14 +1,18 @@
 import { Directory, File, Paths } from 'expo-file-system';
 import {
+  ActivityFeedStore,
   AttendanceMark,
   AttendanceStats,
   ExcusePreset,
   ExcusePresetsStore,
   ExcuseTemplateSettings,
+  HiddenTerminarzStore,
   LessonRealization,
   LibrusMessageDetail,
   LibrusMessageSummary,
   MessageFolder,
+  SchoolAnnouncement,
+  TerminarzEvent,
   WeekSchedule,
 } from '../types/librus';
 
@@ -27,6 +31,11 @@ const MESSAGES_INBOX_FILE = 'messages_inbox.json';
 const MESSAGES_SENT_FILE = 'messages_sent.json';
 const NOTIFIED_SYNC_STATE_FILE = 'notified_sync_state.json';
 const UPDATE_SETTINGS_FILE = 'update_settings.json';
+const TERMINARZ_INDEX_FILE = 'terminarz_index.json';
+const ANNOUNCEMENTS_FILE = 'announcements.json';
+const READ_ANNOUNCEMENTS_FILE = 'read_announcements.json';
+const ACTIVITY_FEED_FILE = 'activity_feed.json';
+const HIDDEN_TERMINARZ_FILE = 'hidden_terminarz.json';
 
 export type UpdateChannel = 'stable' | 'beta';
 
@@ -196,7 +205,17 @@ export function saveCachedWeek(week: WeekSchedule): void {
   if (!weekHasLessons(week)) {
     return;
   }
-  writeJsonSync(weekFileName(week.weekStart), week);
+  const sanitizedWeek: WeekSchedule = {
+    ...week,
+    days: week.days.map((d) => ({
+      ...d,
+      lessons: (d.lessons || []).filter((l) => !l.isStandaloneEvent),
+    })),
+  };
+  if (!weekHasLessons(sanitizedWeek)) {
+    return;
+  }
+  writeJsonSync(weekFileName(sanitizedWeek.weekStart), sanitizedWeek);
   const existing = readJsonSync<string[]>(WEEKS_INDEX_FILE) ?? [];
   const updated = [week.weekStart, ...existing.filter((w) => w !== week.weekStart)];
   const kept = updated.slice(0, MAX_CACHED_WEEKS);
@@ -515,6 +534,152 @@ export function saveUpdateChannel(channel: UpdateChannel): void {
   writeJsonSync(UPDATE_SETTINGS_FILE, { channel });
 }
 
+// --- Terminarz Cache ---
+
+function terminarzMonthFileName(yearMonth: string): string {
+  const safe = yearMonth.replace(/[^0-9-]/g, '');
+  return `terminarz_${safe}.json`;
+}
+
+export function formatYearMonthKey(year: number, month: number): string {
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+export function getCachedTerminarzMonth(yearMonth: string): TerminarzEvent[] | null {
+  return readJsonSync<TerminarzEvent[]>(terminarzMonthFileName(yearMonth));
+}
+
+export function saveCachedTerminarzMonth(yearMonth: string, events: TerminarzEvent[]): void {
+  writeJsonSync(terminarzMonthFileName(yearMonth), events);
+  const existing = readJsonSync<string[]>(TERMINARZ_INDEX_FILE) ?? [];
+  const updated = [yearMonth, ...existing.filter((ym) => ym !== yearMonth)].slice(0, 16);
+  writeJsonSync(TERMINARZ_INDEX_FILE, updated);
+}
+
+export function getAllCachedTerminarzEvents(): TerminarzEvent[] {
+  const index = readJsonSync<string[]>(TERMINARZ_INDEX_FILE) ?? [];
+  const map = new Map<string, TerminarzEvent>();
+  for (const ym of index) {
+    const list = getCachedTerminarzMonth(ym);
+    if (Array.isArray(list)) {
+      for (const ev of list) {
+        if (ev?.id) {
+          map.set(ev.id, ev);
+        }
+      }
+    }
+  }
+  return Array.from(map.values());
+}
+
+// --- School Announcements Cache & Read Tracking ---
+
+interface ReadAnnouncementsStore {
+  seeded: boolean;
+  ids: string[];
+}
+
+export function getCachedAnnouncements(): SchoolAnnouncement[] {
+  return readJsonSync<SchoolAnnouncement[]>(ANNOUNCEMENTS_FILE) ?? [];
+}
+
+export function saveCachedAnnouncements(announcements: SchoolAnnouncement[]): void {
+  writeJsonSync(ANNOUNCEMENTS_FILE, announcements);
+}
+
+export function getReadAnnouncementsStore(): ReadAnnouncementsStore {
+  const saved = readJsonSync<Partial<ReadAnnouncementsStore>>(READ_ANNOUNCEMENTS_FILE);
+  if (!saved) {
+    return { seeded: false, ids: [] };
+  }
+  return {
+    seeded: Boolean(saved.seeded),
+    ids: Array.isArray(saved.ids) ? saved.ids : [],
+  };
+}
+
+export function saveReadAnnouncementsStore(store: ReadAnnouncementsStore): void {
+  writeJsonSync(READ_ANNOUNCEMENTS_FILE, {
+    seeded: store.seeded,
+    ids: capTail(Array.from(new Set(store.ids)), 500),
+  });
+}
+
+export function applyAnnouncementReadState(
+  announcements: SchoolAnnouncement[],
+  todayIso: string
+): SchoolAnnouncement[] {
+  const store = getReadAnnouncementsStore();
+  if (!store.seeded && announcements.length > 0) {
+    // On first run, mark announcements older than today as already read so old history doesn't badge
+    const initialReadIds = announcements
+      .filter((a) => a.date && a.date < todayIso)
+      .map((a) => a.id);
+    saveReadAnnouncementsStore({ seeded: true, ids: initialReadIds });
+    const readSet = new Set(initialReadIds);
+    return announcements.map((a) => ({ ...a, isUnread: !readSet.has(a.id) }));
+  }
+  const readSet = new Set(store.ids);
+  return announcements.map((a) => ({ ...a, isUnread: !readSet.has(a.id) }));
+}
+
+export function markAnnouncementIdsRead(ids: string[]): void {
+  if (!ids || ids.length === 0) return;
+  const store = getReadAnnouncementsStore();
+  const merged = new Set(store.ids);
+  for (const id of ids) {
+    if (id) merged.add(id);
+  }
+  saveReadAnnouncementsStore({
+    seeded: true,
+    ids: Array.from(merged),
+  });
+}
+
+// --- Hidden / Muted Terminarz Events Store ---
+
+export function getHiddenTerminarzStore(): HiddenTerminarzStore {
+  const saved = readJsonSync<Partial<HiddenTerminarzStore>>(HIDDEN_TERMINARZ_FILE);
+  if (!saved) {
+    return { hiddenEventIds: [], hiddenEventsMeta: [], rules: [] };
+  }
+  return {
+    hiddenEventIds: Array.isArray(saved.hiddenEventIds) ? saved.hiddenEventIds : [],
+    hiddenEventsMeta: Array.isArray(saved.hiddenEventsMeta) ? saved.hiddenEventsMeta : [],
+    rules: Array.isArray(saved.rules) ? saved.rules : [],
+  };
+}
+
+export function saveHiddenTerminarzStore(store: HiddenTerminarzStore): void {
+  writeJsonSync(HIDDEN_TERMINARZ_FILE, {
+    hiddenEventIds: capTail(Array.from(new Set(store.hiddenEventIds)), 500),
+    hiddenEventsMeta: (store.hiddenEventsMeta || []).slice(0, 200),
+    rules: (store.rules || []).slice(0, 100),
+  });
+}
+
+// --- Activity Feed ("Ostatnia aktywność") Store ---
+
+export function getActivityFeedStore(): ActivityFeedStore {
+  const saved = readJsonSync<Partial<ActivityFeedStore>>(ACTIVITY_FEED_FILE);
+  if (!saved) {
+    return { seeded: false, seenIds: [], items: [] };
+  }
+  return {
+    seeded: Boolean(saved.seeded),
+    seenIds: Array.isArray(saved.seenIds) ? saved.seenIds : [],
+    items: Array.isArray(saved.items) ? saved.items : [],
+  };
+}
+
+export function saveActivityFeedStore(store: ActivityFeedStore): void {
+  writeJsonSync(ACTIVITY_FEED_FILE, {
+    seeded: store.seeded,
+    seenIds: capTail(Array.from(new Set(store.seenIds)), 2000),
+    items: store.items.slice(0, 150),
+  });
+}
+
 /**
  * Clears cached school-year data (timetables, attendance, realizations, stats, messages, sent excuse dates)
  * while preserving user preferences like ExcuseTemplateSettings and DownloadFolderUri.
@@ -525,6 +690,8 @@ export function clearDataCachesOnly(): void {
   const savedDownloadSettings = readJsonSync<{ folderUri?: string | null }>(DOWNLOAD_SETTINGS_FILE);
   const savedNotifiedState = readJsonSync<NotifiedSyncState>(NOTIFIED_SYNC_STATE_FILE);
   const savedUpdateSettings = readJsonSync<{ channel?: string }>(UPDATE_SETTINGS_FILE);
+  const savedReadAnnouncements = readJsonSync<ReadAnnouncementsStore>(READ_ANNOUNCEMENTS_FILE);
+  const savedHiddenTerminarz = readJsonSync<HiddenTerminarzStore>(HIDDEN_TERMINARZ_FILE);
   clearAllFileCaches();
   if (savedExcuseSettings) {
     writeJsonSync(EXCUSE_SETTINGS_FILE, savedExcuseSettings);
@@ -540,6 +707,12 @@ export function clearDataCachesOnly(): void {
   }
   if (savedUpdateSettings) {
     writeJsonSync(UPDATE_SETTINGS_FILE, savedUpdateSettings);
+  }
+  if (savedReadAnnouncements) {
+    writeJsonSync(READ_ANNOUNCEMENTS_FILE, savedReadAnnouncements);
+  }
+  if (savedHiddenTerminarz) {
+    writeJsonSync(HIDDEN_TERMINARZ_FILE, savedHiddenTerminarz);
   }
   writeJsonSync(SCHOOL_YEAR_META_FILE, { schoolYearId: getCurrentSchoolYearId() });
 }

@@ -1,11 +1,16 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { DaySchedule } from '@/types/librus';
+import { DaySchedule, TerminarzEvent } from '@/types/librus';
 import { formatWeekRangeLabel, parseISODate } from '@/utils/dates';
+import {
+  getDayPrimaryTerminarzEvent,
+  getTerminarzColor,
+} from '@/utils/terminarzMatcher';
 
 interface DayBarProps {
   weekStart: string;
   days: DaySchedule[];
+  terminarzEvents?: TerminarzEvent[];
   selectedDayIndex: number;
   todayIso: string;
   initialWeekStart: string;
@@ -18,6 +23,7 @@ interface DayBarProps {
 export const DayBar: React.FC<DayBarProps> = ({
   weekStart,
   days,
+  terminarzEvents,
   selectedDayIndex,
   todayIso,
   initialWeekStart,
@@ -62,6 +68,23 @@ export const DayBar: React.FC<DayBarProps> = ({
             const isToday = day.date === todayIso;
             const dayNum = parseISODate(day.date).getDate();
 
+            const lessonEvents = day.lessons.flatMap((l) => l.events ?? []);
+            const directDayEvents =
+              terminarzEvents?.filter((ev) => ev.date === day.date) ?? [];
+            const combinedEvents =
+              lessonEvents.length > 0 ? lessonEvents : directDayEvents;
+            const primaryEvent = getDayPrimaryTerminarzEvent(combinedEvents);
+            const eventColor = primaryEvent
+              ? getTerminarzColor(primaryEvent.category)
+              : null;
+
+            const activeBorderColor =
+              eventColor === '#38bdf8' && isSelected
+                ? '#bae6fd'
+                : eventColor === '#94a3b8' && isSelected
+                  ? '#e2e8f0'
+                  : eventColor;
+
             return (
               <Pressable
                 key={day.date || day.dayId}
@@ -69,6 +92,15 @@ export const DayBar: React.FC<DayBarProps> = ({
                 style={[
                   styles.dayPill,
                   isSelected && styles.dayPillActive,
+                  activeBorderColor
+                    ? {
+                        borderWidth: isSelected ? 1.75 : 1.4,
+                        borderColor: activeBorderColor,
+                        backgroundColor: isSelected
+                          ? '#3b82f6'
+                          : `${activeBorderColor}14`,
+                      }
+                    : null,
                 ]}>
                 <Text
                   style={[

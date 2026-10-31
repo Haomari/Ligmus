@@ -1,19 +1,27 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   useWindowDimensions,
   View,
-  RefreshControl,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
-import { getGradeColor, GradeDetailsModal } from '@/components/grade-details-modal';
-import { DaySchedule, Grade, TimetableLesson } from '@/types/librus';
+import {
+  ActivityEventCard,
+  ActivityFeedModal,
+} from '@/components/activity-feed-modal';
+import {
+  ActivityFeedItem,
+  DaySchedule,
+  TimetableLesson,
+  WeekSchedule,
+} from '@/types/librus';
 import {
   getInitialSchoolDate,
   getMonday,
@@ -21,121 +29,103 @@ import {
   toISODate,
 } from '@/utils/dates';
 import { getAllCachedWeeks } from '@/services/fileCache';
+import { getTerminarzColor } from '@/utils/terminarzMatcher';
 import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
+
+function findNextLesson(
+  weeks: Record<string, WeekSchedule>,
+  timetable: DaySchedule[]
+): {
+  nextLesson: TimetableLesson | null;
+  nextLessonDayLabel: string | null;
+} {
+  const now = new Date();
+  const todayIso = toISODate(now);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  const targetDate = getInitialSchoolDate(now);
+  const targetWeekStart = toISODate(getMonday(targetDate));
+  const currentWeekStart = toISODate(getMonday(now));
+
+  const hasLessons = (dList?: DaySchedule[]) =>
+    Boolean(dList && dList.some((d) => d.lessons && d.lessons.length > 0));
+
+  // Check remaining non-cancelled regular lessons today first
+  const todayDays = weeks[currentWeekStart]?.days ?? timetable ?? [];
+  const todaySchedule = todayDays.find((d) => d.date === todayIso);
+  if (todaySchedule) {
+    const upcomingToday = todaySchedule.lessons.find(
+      (l) => !l.isCancelled && !l.isStandaloneEvent && parseHM(l.endTime || '23:59') >= nowMin
+    );
+    if (upcomingToday) {
+      return { nextLesson: upcomingToday, nextLessonDayLabel: 'Dzisiaj' };
+    }
+  }
+
+  // Choose best candidate week for upcoming lessons
+  let days: DaySchedule[] = [];
+  if (hasLessons(weeks[targetWeekStart]?.days)) {
+    days = weeks[targetWeekStart].days;
+  } else if (hasLessons(timetable)) {
+    days = timetable;
+  } else {
+    const allC = getAllCachedWeeks();
+    const anyCachedWeek =
+      Object.values(weeks).find((w) => hasLessons(w?.days)) ??
+      Object.values(allC).find((w) => hasLessons(w?.days));
+    if (anyCachedWeek) {
+      days = anyCachedWeek.days;
+    }
+  }
+
+  // Find the first non-cancelled regular lesson on a future school day in target week
+  for (const d of days) {
+    if (d.date > todayIso) {
+      const firstActive = d.lessons.find((l) => !l.isCancelled && !l.isStandaloneEvent);
+      if (firstActive) {
+        return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
+      }
+    }
+  }
+
+  // Fallback to first non-cancelled regular lesson in days (e.g. Monday morning template)
+  for (const d of days) {
+    const firstActive = d.lessons.find((l) => !l.isCancelled && !l.isStandaloneEvent);
+    if (firstActive) {
+      return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
+    }
+  }
+
+  return { nextLesson: null, nextLessonDayLabel: null };
+}
 
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
   const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const isCompactPhone = windowWidth < 480;
   const {
     student,
-    grades,
     timetable,
     weeks,
     attendanceStats,
+    activityFeed,
     isAuthenticated,
     isLoading,
     isRefreshing,
     refreshData,
   } = useLibrus();
 
+  const [activityModalVisible, setActivityModalVisible] = useState(false);
+
   React.useEffect(() => {
     if (!isLoading && !isAuthenticated) {
       router.replace('/login' as any);
     }
-  }, [isLoading, isAuthenticated]);
+  }, [isLoading, isAuthenticated, router]);
 
-  const { nextLesson } = useMemo((): {
-    nextLesson: TimetableLesson | null;
-    nextLessonDayLabel: string | null;
-  } => {
-    const now = new Date();
-    const todayIso = toISODate(now);
-    const nowMin = now.getHours() * 60 + now.getMinutes();
-
-    const targetDate = getInitialSchoolDate(now);
-    const targetWeekStart = toISODate(getMonday(targetDate));
-    const currentWeekStart = toISODate(getMonday(now));
-
-    const hasLessons = (dList?: DaySchedule[]) =>
-      Boolean(dList && dList.some((d) => d.lessons && d.lessons.length > 0));
-
-    // Check remaining non-cancelled lessons today first
-    const todayDays = weeks[currentWeekStart]?.days ?? timetable ?? [];
-    const todaySchedule = todayDays.find((d) => d.date === todayIso);
-    if (todaySchedule) {
-      const upcomingToday = todaySchedule.lessons.find(
-        (l) => !l.isCancelled && parseHM(l.endTime || '23:59') >= nowMin
-      );
-      if (upcomingToday) {
-        return { nextLesson: upcomingToday, nextLessonDayLabel: 'Dzisiaj' };
-      }
-    }
-
-    // Choose best candidate week for upcoming lessons
-    let days: DaySchedule[] = [];
-    if (hasLessons(weeks[targetWeekStart]?.days)) {
-      days = weeks[targetWeekStart].days;
-    } else if (hasLessons(timetable)) {
-      days = timetable;
-    } else {
-      const allC = getAllCachedWeeks();
-      const anyCachedWeek =
-        Object.values(weeks).find((w) => hasLessons(w?.days)) ??
-        Object.values(allC).find((w) => hasLessons(w?.days));
-      if (anyCachedWeek) {
-        days = anyCachedWeek.days;
-      }
-    }
-
-    // Find the first non-cancelled lesson on a future school day in target week
-    for (const d of days) {
-      if (d.date > todayIso) {
-        const firstActive = d.lessons.find((l) => !l.isCancelled);
-        if (firstActive) {
-          return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
-        }
-      }
-    }
-
-    // Fallback to first non-cancelled lesson in days (e.g. Monday morning template)
-    for (const d of days) {
-      const firstActive = d.lessons.find((l) => !l.isCancelled);
-      if (firstActive) {
-        return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
-      }
-    }
-
-    return { nextLesson: null, nextLessonDayLabel: null };
-  }, [weeks, timetable, isRefreshing]);
-
-  const [gradeModal, setGradeModal] = useState<{
-    visible: boolean;
-    subjectName: string;
-    grades: Grade[];
-    initialIndex: number;
-  }>({
-    visible: false,
-    subjectName: '',
-    grades: [],
-    initialIndex: 0,
-  });
-
-  const openRecentGradeModal = (subjectName: string, gradeId: string, semester: 1 | 2) => {
-    const subj = grades.find((s) => s.subjectName === subjectName);
-    if (!subj) return;
-    const semGrades = subj.grades
-      .filter((gr) => gr.semester === semester)
-      .sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0));
-    const idx = Math.max(0, semGrades.findIndex((gr) => gr.id === gradeId));
-    setGradeModal({
-      visible: true,
-      subjectName,
-      grades: semGrades.length > 0 ? semGrades : subj.grades,
-      initialIndex: idx,
-    });
-  };
+  const { nextLesson } = useMemo(() => findNextLesson(weeks, timetable), [weeks, timetable]);
 
   const attendanceColor = useMemo(() => {
     const pct = attendanceStats?.percent;
@@ -146,17 +136,30 @@ export default function HomeScreen() {
     return '#38bdf8';
   }, [attendanceStats?.percent]);
 
-  // Flatten and sort all grades by date descending to show recent
-  const allGrades = grades
-    .flatMap((s) => s.grades.map((g) => ({ ...g, subjectName: s.subjectName })))
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-    .slice(0, 4);
+  const recentActivity = useMemo(() => activityFeed.slice(0, 4), [activityFeed]);
+
+  const handleActivityPress = useCallback(
+    (item: ActivityFeedItem) => {
+      if (item.targetParams && Object.keys(item.targetParams).length > 0) {
+        router.push({
+          pathname: item.targetRoute as any,
+          params: item.targetParams,
+        });
+      } else {
+        router.push(item.targetRoute as any);
+      }
+    },
+    [router]
+  );
+
+  const nextLessonPrimaryEvent = nextLesson?.events?.[0] ?? null;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <ScrollView
         contentContainerStyle={[
           styles.container,
+          isCompactPhone && styles.containerCompact,
           { paddingBottom: Math.max(insets.bottom + 24, 40) },
         ]}
         showsVerticalScrollIndicator={false}
@@ -184,17 +187,26 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Frekwencja % Tile */}
+        {/* Frekwencja % Tile — 4 Equal Vertical Stat Boxes + Segmented Bar */}
         <TouchableOpacity
           activeOpacity={0.85}
           onPress={() => router.push('/attendance' as any)}
-          style={[styles.card, styles.attendanceCard]}>
+          style={[
+            styles.card,
+            styles.attendanceCard,
+            isCompactPhone && styles.attendanceCardCompact,
+          ]}>
           <View style={styles.attendanceHeaderRow}>
             <View style={styles.attendanceTitleCol}>
               <View style={styles.attendanceLabelRow}>
                 <Ionicons name="pie-chart-outline" size={18} color={attendanceColor} />
                 <Text style={styles.attendanceTitle}>Frekwencja</Text>
               </View>
+              {attendanceStats && attendanceStats.total > 0 && (
+                <Text style={styles.attendanceSubMeta}>
+                  Łącznie rozliczono {attendanceStats.total} lekcji
+                </Text>
+              )}
             </View>
             <View
               style={[
@@ -213,34 +225,132 @@ export default function HomeScreen() {
           </View>
 
           {attendanceStats && attendanceStats.total > 0 && (
-            <View style={styles.attendancePillsRow}>
-              <View style={styles.statPill}>
-                <View style={[styles.statDot, { backgroundColor: '#10b981' }]} />
-                <Text style={styles.statPillText}>
-                  Obecności: {attendanceStats.present}
-                </Text>
+            <>
+              <View style={styles.segmentedBarTrack}>
+                {attendanceStats.present > 0 && (
+                  <View
+                    style={[
+                      styles.segmentedBarFill,
+                      {
+                        flex: attendanceStats.present,
+                        backgroundColor: '#10b981',
+                      },
+                    ]}
+                  />
+                )}
+                {attendanceStats.late > 0 && (
+                  <View
+                    style={[
+                      styles.segmentedBarFill,
+                      {
+                        flex: attendanceStats.late,
+                        backgroundColor: '#f59e0b',
+                      },
+                    ]}
+                  />
+                )}
+                {attendanceStats.excused > 0 && (
+                  <View
+                    style={[
+                      styles.segmentedBarFill,
+                      {
+                        flex: attendanceStats.excused,
+                        backgroundColor: '#3b82f6',
+                      },
+                    ]}
+                  />
+                )}
+                {attendanceStats.absent > 0 && (
+                  <View
+                    style={[
+                      styles.segmentedBarFill,
+                      {
+                        flex: attendanceStats.absent,
+                        backgroundColor: '#ef4444',
+                      },
+                    ]}
+                  />
+                )}
               </View>
-              <View style={styles.statPill}>
-                <View style={[styles.statDot, { backgroundColor: '#ef4444' }]} />
-                <Text style={styles.statPillText}>
-                  Nieobecności: {attendanceStats.absent}
-                </Text>
-              </View>
-              {attendanceStats.excused > 0 && (
-                <View style={styles.statPill}>
-                  <View style={[styles.statDot, { backgroundColor: '#3b82f6' }]} />
-                  <Text style={styles.statPillText}>
-                    Uspr.: {attendanceStats.excused}
+
+              <View
+                style={[
+                  styles.attendanceStatsRow,
+                  isCompactPhone && styles.attendanceStatsRowCompact,
+                ]}>
+                <View
+                  style={[
+                    styles.statBox,
+                    isCompactPhone && styles.statBoxCompact,
+                  ]}>
+                  <Text style={[styles.statBoxValue, { color: '#10b981' }]}>
+                    {attendanceStats.present}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.statBoxLabel,
+                      isCompactPhone && styles.statBoxLabelCompact,
+                    ]}
+                    numberOfLines={1}>
+                    Obecności
                   </Text>
                 </View>
-              )}
-              <View style={styles.statPill}>
-                <View style={[styles.statDot, { backgroundColor: '#f59e0b' }]} />
-                <Text style={styles.statPillText}>
-                  Spóźnienia: {attendanceStats.late}
-                </Text>
+
+                <View
+                  style={[
+                    styles.statBox,
+                    isCompactPhone && styles.statBoxCompact,
+                  ]}>
+                  <Text style={[styles.statBoxValue, { color: '#ef4444' }]}>
+                    {attendanceStats.absent}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.statBoxLabel,
+                      isCompactPhone && styles.statBoxLabelCompact,
+                    ]}
+                    numberOfLines={1}>
+                    {isCompactPhone ? 'Nieob.' : 'Nieobecności'}
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.statBox,
+                    isCompactPhone && styles.statBoxCompact,
+                  ]}>
+                  <Text style={[styles.statBoxValue, { color: '#3b82f6' }]}>
+                    {attendanceStats.excused}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.statBoxLabel,
+                      isCompactPhone && styles.statBoxLabelCompact,
+                    ]}
+                    numberOfLines={1}>
+                    Uspr.
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.statBox,
+                    isCompactPhone && styles.statBoxCompact,
+                  ]}>
+                  <Text style={[styles.statBoxValue, { color: '#f59e0b' }]}>
+                    {attendanceStats.late}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.statBoxLabel,
+                      isCompactPhone && styles.statBoxLabelCompact,
+                    ]}
+                    numberOfLines={1}>
+                    Spóźnienia
+                  </Text>
+                </View>
               </View>
-            </View>
+            </>
           )}
         </TouchableOpacity>
 
@@ -272,11 +382,28 @@ export default function HomeScreen() {
                   <Text style={styles.lessonSubject} numberOfLines={1}>
                     {nextLesson.subject}
                   </Text>
-                  {nextLesson.isSubstitution && (
+                  {nextLesson.isSubstitution ? (
                     <View style={styles.subBadge}>
                       <Text style={styles.subBadgeText}>Zastępstwo</Text>
                     </View>
-                  )}
+                  ) : nextLessonPrimaryEvent ? (
+                    <View
+                      style={[
+                        styles.subBadge,
+                        {
+                          backgroundColor: `${getTerminarzColor(nextLessonPrimaryEvent.category)}1F`,
+                          borderColor: `${getTerminarzColor(nextLessonPrimaryEvent.category)}66`,
+                        },
+                      ]}>
+                      <Text
+                        style={[
+                          styles.subBadgeText,
+                          { color: getTerminarzColor(nextLessonPrimaryEvent.category) },
+                        ]}>
+                        {nextLessonPrimaryEvent.shortLabel}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
                 <Text style={styles.lessonMeta} numberOfLines={1}>
                   {nextLesson.classroom ? `s. ${nextLesson.classroom}` : ''}
@@ -290,7 +417,12 @@ export default function HomeScreen() {
               activeOpacity={0.85}
               onPress={() => router.push('/timetable' as any)}
               style={[styles.card, styles.emptyCard]}>
-              <Ionicons name="calendar-outline" size={22} color="#64748b" style={{ marginBottom: 4 }} />
+              <Ionicons
+                name="calendar-outline"
+                size={22}
+                color="#64748b"
+                style={{ marginBottom: 4 }}
+              />
               <Text style={styles.emptyText}>Brak nadchodzących lekcji</Text>
               <Text style={{ color: '#64748b', fontSize: 12, marginTop: 2 }}>
                 Dotknij, aby otworzyć pełny plan lekcji.
@@ -299,75 +431,55 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* Recent Grades Section */}
+        {/* Ostatnia aktywność Section */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Ostatnie oceny</Text>
-            <TouchableOpacity onPress={() => router.push('/grades' as any)}>
-              <Text style={styles.seeAllText}>Wszystkie oceny →</Text>
+            <Text style={styles.sectionTitle}>Ostatnia aktywność</Text>
+            <TouchableOpacity onPress={() => setActivityModalVisible(true)}>
+              <Text style={styles.seeAllText}>Cała lista →</Text>
             </TouchableOpacity>
           </View>
 
-          <View
-            style={[
-              styles.gradesList,
-              isWideScreen && styles.gradesListWide,
-            ]}>
-            {allGrades.map((g) => (
-              <TouchableOpacity
-                key={g.id}
-                activeOpacity={0.8}
-                onPress={() => openRecentGradeModal(g.subjectName, g.id, g.semester)}
-                style={[
-                  styles.card,
-                  styles.gradeCard,
-                  isWideScreen && styles.gradeCardWide,
-                ]}>
-                <View
-                  style={[
-                    styles.gradeBadge,
-                    { backgroundColor: getGradeColor(g.value) + '20' },
-                  ]}>
-                  <Text
-                    style={[
-                      styles.gradeBadgeValue,
-                      { color: getGradeColor(g.value) },
-                    ]}>
-                    {g.value}
-                  </Text>
-                </View>
-                <View style={styles.gradeInfo}>
-                  <View style={styles.gradeTopRow}>
-                    <Text style={styles.gradeSubject} numberOfLines={1}>
-                      {g.subjectName}
-                    </Text>
-                    <Text style={styles.gradeDate}>{g.date.slice(5)}</Text>
-                  </View>
-                  <View style={styles.gradeBottomRow}>
-                    <Text style={styles.gradeMeta} numberOfLines={1}>
-                      {g.category}
-                      {g.correction ? ` • popr. z ${g.correction.originalValue}` : ''}
-                    </Text>
-                    {g.teacher ? (
-                      <Text style={styles.gradeTeacher} numberOfLines={1}>
-                        {g.teacher}
-                      </Text>
-                    ) : null}
-                  </View>
-                </View>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {recentActivity.length === 0 ? (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => setActivityModalVisible(true)}
+              style={[styles.card, styles.emptyCard]}>
+              <Ionicons
+                name="sparkles-outline"
+                size={22}
+                color="#64748b"
+                style={{ marginBottom: 4 }}
+              />
+              <Text style={styles.emptyText}>Brak nowych wydarzeń z dzisiaj</Text>
+              <Text style={styles.emptyHintText}>
+                Kolejne oceny, wiadomości, ogłoszenia i zmiany planu pojawią się tutaj automatycznie.
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <View
+              style={[
+                styles.activityList,
+                isWideScreen && styles.activityListWide,
+              ]}>
+              {recentActivity.map((item) => (
+                <ActivityEventCard
+                  key={item.id}
+                  item={item}
+                  wideHalf={isWideScreen}
+                  onPress={handleActivityPress}
+                />
+              ))}
+            </View>
+          )}
         </View>
       </ScrollView>
 
-      <GradeDetailsModal
-        key={`${gradeModal.subjectName}-${gradeModal.grades.length}-${gradeModal.initialIndex}`}
-        visible={gradeModal.visible}
-        subjectName={gradeModal.subjectName}
-        grades={gradeModal.grades}
-        initialIndex={gradeModal.initialIndex}
-        onClose={() => setGradeModal((prev) => ({ ...prev, visible: false }))}
+      <ActivityFeedModal
+        visible={activityModalVisible}
+        items={activityFeed}
+        onClose={() => setActivityModalVisible(false)}
+        onSelectItem={handleActivityPress}
       />
     </SafeAreaView>
   );
@@ -382,6 +494,9 @@ const styles = StyleSheet.create({
     padding: 18,
     paddingBottom: 40,
     gap: 18,
+  },
+  containerCompact: {
+    paddingHorizontal: 15,
   },
   header: {
     flexDirection: 'row',
@@ -433,6 +548,10 @@ const styles = StyleSheet.create({
   attendanceCard: {
     gap: 12,
   },
+  attendanceCardCompact: {
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+  },
   attendanceHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -452,9 +571,10 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#f8fafc',
   },
-  attendanceSub: {
-    fontSize: 12,
-    color: '#94a3b8',
+  attendanceSubMeta: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '500',
     marginTop: 2,
   },
   attendancePercentBadge: {
@@ -469,32 +589,57 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '800',
   },
-  attendancePillsRow: {
+  segmentedBarTrack: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#334155',
-  },
-  statPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#0f172a',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  statDot: {
-    width: 6,
     height: 6,
-    borderRadius: 3,
+    borderRadius: 999,
+    backgroundColor: '#0f172a',
+    overflow: 'hidden',
+    gap: 2,
   },
-  statPillText: {
-    color: '#cbd5e1',
-    fontSize: 11,
+  segmentedBarFill: {
+    height: '100%',
+    borderRadius: 999,
+  },
+  attendanceStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
+  },
+  attendanceStatsRowCompact: {
+    gap: 6,
+  },
+  statBox: {
+    flex: 1,
+    minWidth: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#263449',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+  },
+  statBoxCompact: {
+    paddingVertical: 9,
+    paddingHorizontal: 6,
+  },
+  statBoxValue: {
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  statBoxLabel: {
+    color: '#94a3b8',
+    fontSize: 11.5,
     fontWeight: '600',
+    textAlign: 'center',
+  },
+  statBoxLabelCompact: {
+    fontSize: 10,
+    letterSpacing: -0.2,
   },
   section: {
     gap: 10,
@@ -578,120 +723,24 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
   },
   emptyText: {
-    color: '#94a3b8',
+    color: '#cbd5e1',
     fontSize: 14,
+    fontWeight: '600',
   },
-  gradesList: {
+  emptyHintText: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 4,
+    textAlign: 'center',
+    lineHeight: 17,
+  },
+  activityList: {
     gap: 8,
   },
-  gradesListWide: {
+  activityListWide: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
     gap: 10,
-  },
-  gradeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-  },
-  gradeCardWide: {
-    width: '48.8%',
-  },
-  gradeBadge: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  gradeBadgeValue: {
-    fontSize: 17,
-    fontWeight: '800',
-  },
-  gradeInfo: {
-    flex: 1,
-    gap: 3,
-  },
-  gradeTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  gradeBottomRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  gradeSubject: {
-    flex: 1,
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#f8fafc',
-  },
-  gradeMeta: {
-    flex: 1,
-    fontSize: 12,
-    color: '#94a3b8',
-  },
-  gradeTeacher: {
-    flexShrink: 1,
-    maxWidth: '48%',
-    fontSize: 11,
-    color: '#64748b',
-    fontWeight: '500',
-    textAlign: 'right',
-  },
-  gradeDate: {
-    fontSize: 11,
-    color: '#64748b',
-    fontWeight: '600',
-  },
-  infoCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1e293b80',
-    borderColor: '#3b82f640',
-    marginTop: 6,
-  },
-  infoTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#e2e8f0',
-  },
-  infoDesc: {
-    fontSize: 12,
-    color: '#94a3b8',
-    marginTop: 2,
-    lineHeight: 16,
-  },
-
-  activityRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-
-  activityDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#22c55e',
-    shadowColor: '#22c55e',
-    shadowOffset: {
-      width: 0,
-      height: 0,
-    },
-    shadowOpacity: 0.8,
-    shadowRadius: 5,
-    elevation: 4,
-  },
-
-  activityIndicator: {
-    opacity: 0.6,
   },
 });

@@ -16,6 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Directory } from 'expo-file-system';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
+import { librusClient } from '@/services/librusClient';
 import {
   DEFAULT_SYNC_SETTINGS,
   getSyncSettings,
@@ -53,7 +54,18 @@ const MAX_EXCUSE_PRESETS = 8;
 export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { student, clearLocalCacheAndRefresh, logout } = useLibrus();
+  const {
+    student,
+    hiddenTerminarzStore,
+    restoreHiddenTerminarzEvent,
+    restoreHiddenTerminarzRule,
+    clearAllHiddenTerminarz,
+    clearLocalCacheAndRefresh,
+    authInvalidState,
+    savedLogin,
+    openCredentialsModal,
+    logout,
+  } = useLibrus();
 
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(DEFAULT_SYNC_SETTINGS);
   const [excuseStore, setExcuseStore] = useState<ExcusePresetsStore>(() =>
@@ -378,12 +390,60 @@ export default function SettingsScreen() {
                   <Text style={styles.schoolYearBadgeText}>{schoolYearId}</Text>
                 </View>
               </View>
-              <Text style={styles.studentClass}>
+              <Text style={styles.studentClass} numberOfLines={1}>
                 {student?.classGroup || 'Konto Librus'}
-                {student?.educator ? ` • Wych. ${student.educator}` : ''}
               </Text>
+              {student?.educator ? (
+                <Text style={styles.studentEducator} numberOfLines={1}>
+                  Wych. {student.educator}
+                </Text>
+              ) : null}
             </View>
           </View>
+
+          <View style={styles.divider} />
+
+          <TouchableOpacity
+            style={styles.actionRow}
+            activeOpacity={0.8}
+            onPress={openCredentialsModal}
+            onLongPress={
+              __DEV__
+                ? () => {
+                    void librusClient.simulateAuthInvalidForDev();
+                  }
+                : undefined
+            }
+            delayLongPress={500}>
+            <Ionicons
+              name="key-outline"
+              size={20}
+              color={authInvalidState ? '#f59e0b' : '#38bdf8'}
+            />
+            <View style={{ flex: 1 }}>
+              <Text
+                style={[
+                  styles.actionTitle,
+                  authInvalidState && { color: '#fcd34d' },
+                ]}>
+                {authInvalidState
+                  ? 'Wymagana aktualizacja hasła'
+                  : 'Zmień zapisane hasło Librus'}
+              </Text>
+              <Text style={styles.actionSubText} numberOfLines={1}>
+                {authInvalidState
+                  ? 'Zapisane hasło przestało działać — dotknij, aby wpisać nowe'
+                  : savedLogin
+                    ? `Konto: ${savedLogin} · bez utraty danych lokalnych`
+                    : 'Zaktualizuj hasło po jego zmianie w Librusie'}
+              </Text>
+            </View>
+            <Ionicons
+              name="chevron-forward"
+              size={18}
+              color={authInvalidState ? '#f59e0b' : '#64748b'}
+            />
+          </TouchableOpacity>
         </View>
 
         {/* Excuse Presets Section */}
@@ -638,6 +698,109 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* Hidden Terminarz Events & Rules */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionHeader}>Ukryte wydarzenia z terminarza</Text>
+            {hiddenTerminarzStore.rules.length +
+              hiddenTerminarzStore.hiddenEventsMeta.length >
+              1 && (
+              <TouchableOpacity
+                activeOpacity={0.75}
+                onPress={() => {
+                  clearAllHiddenTerminarz();
+                  setToastMessage('Przywrócono wszystkie ukryte wydarzenia');
+                }}>
+                <Text style={styles.restoreAllLinkText}>Przywróć wszystkie</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.card}>
+            {hiddenTerminarzStore.rules.length === 0 &&
+            hiddenTerminarzStore.hiddenEventIds.length === 0 ? (
+              <View style={styles.actionRow}>
+                <Ionicons name="eye-outline" size={20} color="#64748b" />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actionTitle}>Brak ukrytych wydarzeń</Text>
+                  <Text style={styles.actionSubText}>
+                    Otwórz wydarzenie w planie lekcji (lub przytrzymaj kafelek) i wybierz „Ukryj”.
+                  </Text>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.hiddenItemsList}>
+                {hiddenTerminarzStore.rules.map((rule, idx) => (
+                  <React.Fragment key={rule.id}>
+                    {idx > 0 && <View style={styles.divider} />}
+                    <View style={styles.actionRow}>
+                      <Ionicons name="eye-off-outline" size={19} color="#38bdf8" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.actionTitle} numberOfLines={1}>
+                          {rule.displayType}
+                          {rule.subjectLabel ? ` · ${rule.subjectLabel}` : ''}
+                        </Text>
+                        <Text style={styles.actionSubText} numberOfLines={1}>
+                          Zawsze ukryte
+                          {rule.teacher ? ` · ${rule.teacher}` : ''}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          restoreHiddenTerminarzRule(rule.id);
+                          setToastMessage('Przywrócono wydarzenia do planu');
+                        }}
+                        style={styles.inlineResetPill}>
+                        <Text style={styles.inlineResetPillText}>Przywróć</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </React.Fragment>
+                ))}
+
+                {hiddenTerminarzStore.hiddenEventIds.map((eventId, idx) => {
+                  const meta = hiddenTerminarzStore.hiddenEventsMeta.find(
+                    (m) => m.id === eventId
+                  );
+                  const showDivider =
+                    idx > 0 || hiddenTerminarzStore.rules.length > 0;
+                  return (
+                    <React.Fragment key={eventId}>
+                      {showDivider && <View style={styles.divider} />}
+                      <View style={styles.actionRow}>
+                        <Ionicons
+                          name="calendar-outline"
+                          size={19}
+                          color="#94a3b8"
+                        />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.actionTitle} numberOfLines={1}>
+                            {meta?.displayType || 'Ukryte wydarzenie'}
+                            {meta?.subject ? ` · ${meta.subject}` : ''}
+                          </Text>
+                          <Text style={styles.actionSubText} numberOfLines={1}>
+                            Tylko termin {meta?.date || eventId}
+                            {meta?.teacher ? ` · ${meta.teacher}` : ''}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          activeOpacity={0.8}
+                          onPress={() => {
+                            restoreHiddenTerminarzEvent(eventId);
+                            setToastMessage('Przywrócono wydarzenie');
+                          }}
+                          style={styles.inlineResetPill}>
+                          <Text style={styles.inlineResetPillText}>Przywróć</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </React.Fragment>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        </View>
+
         {/* Data & Files (Merged Download Folder + Cache) */}
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Dane i pliki</Text>
@@ -873,6 +1036,12 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     color: '#38bdf8',
     marginTop: 3,
+    fontWeight: '600',
+  },
+  studentEducator: {
+    fontSize: 12.5,
+    color: '#38bdf8',
+    marginTop: 2,
     fontWeight: '600',
   },
   section: {
@@ -1199,5 +1368,19 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: '#cbd5e1',
     lineHeight: 15,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  restoreAllLinkText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#38bdf8',
+  },
+  hiddenItemsList: {
+    gap: 2,
   },
 });

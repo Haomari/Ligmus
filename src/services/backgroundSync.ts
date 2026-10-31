@@ -14,12 +14,18 @@ import {
 } from '@/types/librus';
 import { addDays, getMonday, toISODate } from '@/utils/dates';
 import {
+  getAllCachedTerminarzEvents,
+  getAllCachedWeeks,
+  getCachedAnnouncements,
   getCachedAttendanceMarks,
   getCachedMessages,
   getCachedWeek,
+  getHiddenTerminarzStore,
   getNotifiedSyncState,
   saveNotifiedSyncState,
 } from './fileCache';
+import { reconcileActivityFeed } from './activityFeed';
+import { filterVisibleTerminarzEvents } from '@/utils/terminarzMatcher';
 import { librusClient } from './librusClient';
 
 export const BACKGROUND_SYNC_TASK = 'LIGMUS_BACKGROUND_SYNC_TASK';
@@ -119,6 +125,14 @@ export async function setupNotificationChannelAsync(): Promise<void> {
       importance: 7, // AndroidImportance.MAX
       vibrationPattern: [0, 250, 250, 250],
       lightColor: '#60a5fa',
+      sound: 'default',
+      showBadge: true,
+    });
+    await Notifications.setNotificationChannelAsync('librus-account', {
+      name: 'Konto i autoryzacja',
+      importance: 7, // AndroidImportance.MAX
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#f59e0b',
       sound: 'default',
       showBadge: true,
     });
@@ -334,6 +348,35 @@ export function addNotificationResponseListener(
   }
 }
 
+async function handleBackgroundInvalidAuthIfNeeded(
+  Notifications: typeof NotificationsType | null,
+  shouldNotifyUser: boolean
+): Promise<boolean> {
+  const invalidState = librusClient.getAuthInvalidState();
+  if (!invalidState) {
+    return false;
+  }
+
+  if (!invalidState.notifiedInBackground && shouldNotifyUser && Notifications) {
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Wymagana aktualizacja hasła Librus',
+          body: 'Zapisane hasło przestało działać. Dotknij, aby wpisać nowe hasło i wznowić synchronizację.',
+          data: { url: '/?reauth=1' },
+          sound: 'default',
+        },
+        trigger: Platform.OS === 'android' ? { channelId: 'librus-account' } : null,
+      });
+      await librusClient.markAuthInvalidBackgroundNotified();
+    } catch (err) {
+      console.warn('[SmartSync] Failed to send invalid-credentials notification:', err);
+    }
+  }
+
+  return true;
+}
+
 /**
  * Core background synchronization function (messages + grades + timetable changes + attendance)
  */
@@ -362,6 +405,11 @@ export async function executeSmartSync(): Promise<number> {
     const shouldNotifyUser = Boolean(Notifications) && AppState.currentState !== 'active';
     if (shouldNotifyUser) {
       await setupNotificationChannelAsync();
+    }
+
+    // Pause background sync if stored password was already rejected by Librus (prevents account rate-limiting)
+    if (await handleBackgroundInvalidAuthIfNeeded(Notifications, shouldNotifyUser)) {
+      return BackgroundSyncResult.NoData;
     }
 
     // Snapshot existing caches and persistent deduplication state BEFORE scraping live pages
@@ -412,6 +460,7 @@ export async function executeSmartSync(): Promise<number> {
     collectOldLessons(oldTomorrowWeek, tomorrowIso);
 
     let foundNewData = false;
+    let syncedInbox: LibrusMessageSummary[] = oldInbox;
 
     // --- 1. MESSAGES DIFF (Top priority + warms/refreshes Librus session once before parallel calls) ---
     try {
@@ -427,7 +476,14 @@ export async function executeSmartSync(): Promise<number> {
       }
 
       const freshInbox = await librusClient.getMessages('inbox');
+
+      // If warming the session detected changed/invalid credentials, notify once & abort remaining fetches
+      if (await handleBackgroundInvalidAuthIfNeeded(Notifications, shouldNotifyUser)) {
+        return BackgroundSyncResult.NoData;
+      }
+
       if (freshInbox && freshInbox.length > 0) {
+        syncedInbox = freshInbox;
         if (!syncState.seededMessages) {
           // Very first run with empty cache: seed silently without spamming old unread messages
           for (const m of freshInbox) {
@@ -499,16 +555,23 @@ export async function executeSmartSync(): Promise<number> {
       console.warn('[SmartSync] Messages check warning:', msgErr);
     }
 
-    // --- 2. PARALLEL GRADES + LIGHTWEIGHT ATTENDANCE + TIMETABLE DIFF ---
-    const [gradesSettled, attSettled, todayWeekSettled, tomorrowWeekSettled] =
-      await Promise.allSettled([
-        librusClient.getGrades(),
-        librusClient.getAttendanceAndRealizations({ includeRealizations: false }),
-        librusClient.getWeek(todayWeekStart),
-        tomorrowWeekStart === todayWeekStart
-          ? Promise.resolve<WeekSchedule | null>(null)
-          : librusClient.getWeek(tomorrowWeekStart),
-      ]);
+    // --- 2. PARALLEL GRADES + LIGHTWEIGHT ATTENDANCE + TIMETABLE + SILENT FEED DIFF ---
+    const [
+      gradesSettled,
+      attSettled,
+      todayWeekSettled,
+      tomorrowWeekSettled,
+      annSettled,
+    ] = await Promise.allSettled([
+      librusClient.getGrades(),
+      librusClient.getAttendanceAndRealizations({ includeRealizations: false }),
+      librusClient.getWeek(todayWeekStart),
+      tomorrowWeekStart === todayWeekStart
+        ? Promise.resolve<WeekSchedule | null>(null)
+        : librusClient.getWeek(tomorrowWeekStart),
+      librusClient.getAnnouncements(),
+      librusClient.getTerminarzMonth(now.getFullYear(), now.getMonth() + 1),
+    ]);
 
     // 2A. Grades diff
     if (gradesSettled.status === 'fulfilled' && gradesSettled.value.length > 0) {
@@ -687,6 +750,30 @@ export async function executeSmartSync(): Promise<number> {
       notifiedAttendanceIds: Array.from(notifiedAttendanceSet),
       notifiedTimetableKeys: Array.from(notifiedTimetableSet),
     });
+
+    try {
+      reconcileActivityFeed({
+        grades:
+          gradesSettled.status === 'fulfilled' && gradesSettled.value.length > 0
+            ? gradesSettled.value
+            : cachedGrades,
+        inboxMessages: syncedInbox,
+        announcements:
+          annSettled.status === 'fulfilled' ? annSettled.value : getCachedAnnouncements(),
+        attendanceMarks:
+          attSettled.status === 'fulfilled' && attSettled.value.marks.length > 0
+            ? attSettled.value.marks
+            : oldMarks,
+        weeks: getAllCachedWeeks(),
+        terminarzEvents: filterVisibleTerminarzEvents(
+          getAllCachedTerminarzEvents(),
+          getHiddenTerminarzStore()
+        ),
+        now,
+      });
+    } catch (feedErr) {
+      console.warn('[SmartSync] Activity feed reconciliation warning:', feedErr);
+    }
 
     return foundNewData ? BackgroundSyncResult.NewData : BackgroundSyncResult.NoData;
   } catch (error) {

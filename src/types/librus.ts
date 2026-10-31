@@ -87,6 +87,8 @@ export interface TimetableLesson {
   topic?: string;
   note?: string;
   attendance?: AttendanceMark;
+  events?: TerminarzEvent[];
+  isStandaloneEvent?: boolean;
 }
 
 export interface DaySchedule {
@@ -130,6 +132,94 @@ export interface SubjectAttendanceStat {
 }
 
 export type MessageFolder = 'inbox' | 'sent';
+export type SkrzynkaTab = 'inbox' | 'sent' | 'announcements';
+
+export type TerminarzCategory =
+  | 'exam'
+  | 'quiz'
+  | 'retake'
+  | 'oral'
+  | 'consultation'
+  | 'other'
+  | 'free_day';
+
+export interface TerminarzEvent {
+  id: string;
+  date: string;            // "YYYY-MM-DD"
+  lessonNumber: number;    // >= 0 when "Nr lekcji" present, -1 when only explicit time given
+  hasExplicitLessonZero?: boolean;
+  startTime?: string;      // e.g. "18:00" when "Czas: 18:00 - 19:30" present
+  endTime?: string;        // e.g. "19:30"
+  autoAdjustedFromLesson?: number; // original lessonNumber if auto-matched onto another lesson
+  rawType: string;         // e.g. "klasówka", "kartkówka", "Inna"
+  displayType: string;     // e.g. "Klasówka", "Kartkówka", "Konsultacje", "Poprawa"
+  shortLabel: string;      // e.g. "Spr.", "Kartk.", "Popr.", "Odp.", "Kons."
+  category: TerminarzCategory;
+  subject?: string;        // e.g. "Matematyka"
+  teacher?: string;        // e.g. "Znamirowska Ewa"
+  classroom?: string;
+  description?: string;    // e.g. "Rachunek różniczkowy"
+  addedAt?: string;        // e.g. "2026-10-20 09:40:52"
+}
+
+export interface HiddenTerminarzRule {
+  id: string;
+  teacher?: string;
+  category: TerminarzCategory;
+  displayType: string;
+  subjectLabel?: string;
+  createdAt: number;
+}
+
+export interface HiddenTerminarzItemMeta {
+  id: string;
+  date: string;
+  displayType: string;
+  teacher?: string;
+  subject?: string;
+}
+
+export interface HiddenTerminarzStore {
+  hiddenEventIds: string[];
+  hiddenEventsMeta: HiddenTerminarzItemMeta[];
+  rules: HiddenTerminarzRule[];
+}
+
+export interface SchoolAnnouncement {
+  id: string;
+  title: string;
+  author: string;
+  date: string;            // "YYYY-MM-DD"
+  content: string;
+  isUnread?: boolean;
+}
+
+export type ActivityItemKind =
+  | 'grade'
+  | 'message'
+  | 'announcement'
+  | 'attendance'
+  | 'timetable'
+  | 'terminarz';
+
+export interface ActivityFeedItem {
+  id: string;
+  kind: ActivityItemKind;
+  title: string;
+  subtitle: string;
+  badgeText?: string;
+  accentColor: string;
+  date: string;            // "YYYY-MM-DD"
+  timestamp: number;
+  targetRoute: '/grades' | '/messages' | '/attendance' | '/timetable';
+  targetParams?: Record<string, string>;
+}
+
+export interface ActivityFeedStore {
+  seeded: boolean;
+  seenIds: string[];
+  items: ActivityFeedItem[];
+}
 
 export interface LibrusAttachment {
   name: string;

@@ -18,14 +18,14 @@ export default function AppTabs() {
   const scheme = useColorScheme();
   const colors = Colors[scheme === 'dark' ? 'dark' : 'light'];
   const { width: windowWidth } = useWindowDimensions();
-  const { unreadMessagesCount, subjectAttendanceAlert } = useLibrus();
+  const { unreadMessagesCount, unreadAnnouncementsCount, subjectAttendanceAlert } = useLibrus();
   const [menuVisible, setMenuVisible] = useState(false);
 
   const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
   const menuDotColor =
     subjectAttendanceAlert === 'danger'
       ? '#ef4444'
-      : unreadMessagesCount > 0
+      : unreadMessagesCount + unreadAnnouncementsCount > 0
         ? '#3b82f6'
         : subjectAttendanceAlert === 'warning'
           ? '#f59e0b'
