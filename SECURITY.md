@@ -6,8 +6,8 @@ Only the latest version of the app is actively maintained.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.5.x-alpha | :white_check_mark: |
-| < 0.5.0 | :x: |
+| 1.0.0 | :white_check_mark: |
+| < 1.0.0 | :x: |
 
 ## Reporting an Issue
 

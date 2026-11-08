@@ -13,7 +13,7 @@
 - **Messages & Announcements** - Inbox/sent messages, school announcements, attachment downloads, and an absence excuse generator with customizable presets.
 - **Background Notifications** - Checks for new messages, grades, and timetable changes in the background with **Smart Hours** (`Mon-Fri, 07:30-18:00`).
 - **Foldable & Tablet Layout** - Adaptive right-side thumb navigation rail and multi-column grids on wide screens.
-- **Two-Channel Updater** - Switch between **Stable** (`master`) and **Beta** (`beta-updates`) channels directly in **Settings**.
+- **Two-Channel Updater** - Switch between **Stable** (`master`) and **Beta** (`beta-updates`) channels directly in **Settings** (`Ustawienia`).
 
 ## Installation
 
