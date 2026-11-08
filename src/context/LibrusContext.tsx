@@ -19,6 +19,7 @@ import {
 import { AuthInvalidState, librusClient } from '@/services/librusClient';
 import {
   applyAnnouncementReadState,
+  applyInboxReadState,
   clearDataCachesOnly,
   ensureSchoolYearCacheValid,
   formatYearMonthKey,
@@ -33,6 +34,7 @@ import {
   getHiddenTerminarzStore,
   isValidAttendanceStats,
   markAnnouncementIdsRead,
+  markInboxMessageIdsRead,
   recordSeenInboxMessages,
   saveCachedAttendanceStats,
   saveCachedMessages,
@@ -76,6 +78,7 @@ interface LibrusContextType {
   loadMessages: (folder: MessageFolder) => Promise<LibrusMessageSummary[]>;
   loadAnnouncements: () => Promise<SchoolAnnouncement[]>;
   markMessageAsReadLocal: (messageId: string) => void;
+  markAllMessagesReadLocal: () => void;
   markAnnouncementAsReadLocal: (announcementId: string) => void;
   markAllAnnouncementsReadLocal: () => void;
   hideTerminarzSingleEvent: (event: TerminarzEvent) => void;
@@ -291,6 +294,19 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const loadWeek = useCallback(
     async (weekStartIso: string, forceNetwork: boolean = false): Promise<WeekSchedule | null> => {
+      // Pre-hydrate any cached Terminarz months for this week from disk first
+      for (const { ymKey } of getWeekMonthPairs(weekStartIso)) {
+        const hasMonthInMem = terminarzRef.current.some(
+          (ev) => ev.date.slice(0, 7) === ymKey
+        );
+        if (!hasMonthInMem) {
+          const cachedMonth = getCachedTerminarzMonth(ymKey);
+          if (cachedMonth && cachedMonth.length > 0) {
+            replaceMonthTerminarzEvents(ymKey, cachedMonth);
+          }
+        }
+      }
+
       const cached = librusClient.getCachedWeekSchedule(weekStartIso);
       if (cached && weekHasLessons(cached)) {
         const mergedCached = attachTerminarzToWeek(
@@ -298,8 +314,20 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           filterVisibleTerminarzEvents(terminarzRef.current, hiddenTerminarzRef.current)
         );
         setWeeks((prev) => ({ ...prev, [weekStartIso]: mergedCached }));
+
+        const hasFreeDayMissingReason = mergedCached.days.some(
+          (d) =>
+            d.isFreeDay &&
+            !terminarzRef.current.some(
+              (ev) => ev.date === d.date && ev.category === 'free_day'
+            )
+        );
+
         if (!forceNetwork && Date.now() - cached.fetchedAt < 5 * 60 * 1000) {
-          const updatedEvents = await ensureTerminarzForWeek(weekStartIso, false);
+          const updatedEvents = await ensureTerminarzForWeek(
+            weekStartIso,
+            hasFreeDayMissingReason
+          );
           const withTerminarz = attachTerminarzToWeek(
             mergedCached,
             filterVisibleTerminarzEvents(updatedEvents, hiddenTerminarzRef.current)
@@ -311,7 +339,7 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       const [fresh, updatedEvents] = await Promise.all([
         librusClient.getWeek(weekStartIso),
-        ensureTerminarzForWeek(weekStartIso, forceNetwork),
+        ensureTerminarzForWeek(weekStartIso, true),
       ]);
       const visibleUpdated = filterVisibleTerminarzEvents(
         updatedEvents,
@@ -326,7 +354,15 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         );
         const mergedFresh = attachTerminarzToWeek(mergedBase, visibleUpdated);
         saveCachedWeek(mergedBase);
-        setWeeks((prev) => ({ ...prev, [weekStartIso]: mergedFresh }));
+        setWeeks((prev) => {
+          const nextWeeks = { ...prev, [weekStartIso]: mergedFresh };
+          const updatedFeed = reconcileActivityFeed({
+            weeks: nextWeeks,
+            terminarzEvents: visibleUpdated,
+          });
+          setActivityFeed(updatedFeed);
+          return nextWeeks;
+        });
 
         setAttendanceStats((prevStats) => {
           const allWk = { ...getAllCachedWeeks(), [weekStartIso]: mergedBase };
@@ -359,7 +395,7 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       return null;
     },
-    [ensureTerminarzForWeek]
+    [ensureTerminarzForWeek, getWeekMonthPairs, replaceMonthTerminarzEvents]
   );
 
   const loadMessages = useCallback(async (folder: MessageFolder): Promise<LibrusMessageSummary[]> => {
@@ -372,9 +408,11 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const fresh = await librusClient.getMessages(folder);
     if (fresh) {
       if (folder === 'inbox') {
-        setInboxMessages(fresh);
-        recordSeenInboxMessages(fresh);
-        setActivityFeed(reconcileActivityFeed({ inboxMessages: fresh }));
+        const hydrated = applyInboxReadState(fresh);
+        setInboxMessages(hydrated);
+        recordSeenInboxMessages(hydrated);
+        setActivityFeed(reconcileActivityFeed({ inboxMessages: hydrated }));
+        return hydrated;
       } else {
         setSentMessages(fresh);
       }
@@ -398,8 +436,18 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, []);
 
   const markMessageAsReadLocal = useCallback((messageId: string) => {
+    markInboxMessageIdsRead([messageId]);
     setInboxMessages((prev) => {
       const updated = prev.map((m) => (m.id === messageId ? { ...m, isUnread: false } : m));
+      saveCachedMessages('inbox', updated);
+      return updated;
+    });
+  }, []);
+
+  const markAllMessagesReadLocal = useCallback(() => {
+    setInboxMessages((prev) => {
+      markInboxMessageIdsRead(prev.map((m) => m.id));
+      const updated = prev.map((m) => ({ ...m, isUnread: false }));
       saveCachedMessages('inbox', updated);
       return updated;
     });
@@ -597,18 +645,14 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         terminarzRef.current = cachedTerm;
         setTerminarzEvents(cachedTerm);
       }
-      if (cachedFeedStore.items.length > 0) {
-        setActivityFeed(cachedFeedStore.items);
-      }
-
       if (cachedStu) setStudent(cachedStu);
       if (cachedGrd && cachedGrd.length > 0) setGrades(cachedGrd);
+      const visibleCachedTerm = filterVisibleTerminarzEvents(
+        cachedTerm,
+        hiddenTerminarzRef.current
+      );
+      const hydratedCachedWeeks: Record<string, WeekSchedule> = {};
       if (Object.keys(cachedWeeks).length > 0) {
-        const visibleCachedTerm = filterVisibleTerminarzEvents(
-          cachedTerm,
-          hiddenTerminarzRef.current
-        );
-        const hydratedCachedWeeks: Record<string, WeekSchedule> = {};
         for (const [ws, wk] of Object.entries(cachedWeeks)) {
           hydratedCachedWeeks[ws] = attachTerminarzToWeek(wk, visibleCachedTerm);
         }
@@ -618,6 +662,18 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         if (initWeek && weekHasLessons(initWeek)) {
           setTimetable(initWeek.days);
         }
+      }
+      if (cachedFeedStore.items.length > 0) {
+        const cleanedInitialFeed = reconcileActivityFeed({
+          grades: cachedGrd ?? [],
+          inboxMessages: cachedInbox,
+          announcements: cachedAnn,
+          attendanceMarks: cachedMarks,
+          weeks: hydratedCachedWeeks,
+          terminarzEvents: visibleCachedTerm,
+          now,
+        });
+        setActivityFeed(cleanedInitialFeed);
       }
       if (cachedStats && isValidAttendanceStats(cachedStats)) {
         setAttendanceStats(cachedStats);
@@ -638,13 +694,29 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         return;
       }
 
-      // Collect unique calendar months needed for initialWeekStart and currentWeekStart
+      // Collect unique calendar months needed for initialWeekStart, currentWeekStart, and any cached upcoming free days missing Terminarz holiday names
       const monthPairsMap = new Map<string, { year: number; month: number; ymKey: string }>();
       for (const p of [
         ...getWeekMonthPairs(initialWeekStart),
         ...getWeekMonthPairs(currentWeekStart),
       ]) {
         monthPairsMap.set(p.ymKey, p);
+      }
+      for (const wk of Object.values(cachedWeeks)) {
+        if (monthPairsMap.size >= 5) break;
+        const hasUpcomingMissingFreeDay = (wk.days ?? []).some(
+          (d) =>
+            d.date >= todayIso &&
+            d.isFreeDay &&
+            !cachedTerm.some((ev) => ev.date === d.date && ev.category === 'free_day')
+        );
+        if (hasUpcomingMissingFreeDay && wk.weekStart) {
+          for (const p of getWeekMonthPairs(wk.weekStart)) {
+            if (monthPairsMap.size < 5) {
+              monthPairsMap.set(p.ymKey, p);
+            }
+          }
+        }
       }
       const neededMonths = Array.from(monthPairsMap.values());
 
@@ -685,9 +757,10 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
       if (stu) setStudent(stu);
       if (grd && grd.length > 0) setGrades(grd);
+      const hydratedInbox = freshInbox ? applyInboxReadState(freshInbox) : cachedInbox;
       if (freshInbox) {
-        setInboxMessages(freshInbox);
-        recordSeenInboxMessages(freshInbox);
+        setInboxMessages(hydratedInbox);
+        recordSeenInboxMessages(hydratedInbox);
       }
       if (freshSent) setSentMessages(freshSent);
 
@@ -777,7 +850,7 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       // Reconcile persistent "Ostatnia aktywność" feed
       const reconciledFeed = reconcileActivityFeed({
         grades: grd && grd.length > 0 ? grd : cachedGrd ?? [],
-        inboxMessages: freshInbox ?? cachedInbox,
+        inboxMessages: hydratedInbox,
         announcements: hydratedAnn,
         attendanceMarks: marksRef.current,
         weeks: newWeeksMap,
@@ -978,6 +1051,7 @@ export const LibrusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         loadMessages,
         loadAnnouncements,
         markMessageAsReadLocal,
+        markAllMessagesReadLocal,
         markAnnouncementAsReadLocal,
         markAllAnnouncementsReadLocal,
         hideTerminarzSingleEvent,

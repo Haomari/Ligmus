@@ -16,7 +16,10 @@ import { computeDetailedAttendance } from '@/services/timetableMapper';
 import { SemesterFilter, SubjectAttendanceStat } from '@/types/librus';
 import { getSubjectColor } from '@/utils/subjectColors';
 import { AttendanceIcon } from '@/components/timetable/AttendanceIcon';
-import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
 
 const SEMESTER_OPTIONS: { key: SemesterFilter; label: string }[] = [
   { key: 'sem1', label: 'Semestr 1' },
@@ -122,7 +125,12 @@ export default function AttendanceScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.container,
-          { paddingBottom: Math.max(insets.bottom + 28, 44) },
+          {
+            paddingBottom: Math.max(
+              getEffectiveBottomInset(insets.bottom, isWideScreen) + 32,
+              44
+            ),
+          },
         ]}
         showsVerticalScrollIndicator={false}
         refreshControl={

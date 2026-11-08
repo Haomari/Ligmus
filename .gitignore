@@ -51,3 +51,6 @@ scripts/
 # agents
 .agents/
 .agent/
+
+/ligmus.apk
+/ligmus.ipa

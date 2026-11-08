@@ -697,8 +697,9 @@ export async function executeSmartSync(): Promise<number> {
         dayWord: string
       ) => {
         const day = wk?.days.find((d) => d.date === dateIso);
-        if (!day) return;
+        if (!day || day.isFreeDay) return;
         for (const lesson of day.lessons) {
+          if (lesson.isFreeDay) continue;
           const prev = oldLessonsById.get(`${dateIso}:${lesson.id}`);
           if (!prev) continue;
 

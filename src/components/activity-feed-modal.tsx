@@ -65,8 +65,13 @@ export const ActivityEventCard: React.FC<ActivityEventCardProps> = ({
   wideHalf,
 }) => {
   const meta = getActivityKindMeta(item.kind);
+  const isFreeDayItem =
+    item.id.startsWith('free_day:') || item.badgeText === 'Wolne';
   const showTextBadge =
-    item.kind === 'grade' || item.kind === 'attendance' || item.kind === 'terminarz';
+    !isFreeDayItem &&
+    (item.kind === 'grade' ||
+      item.kind === 'attendance' ||
+      item.kind === 'terminarz');
 
   return (
     <TouchableOpacity
@@ -92,7 +97,11 @@ export const ActivityEventCard: React.FC<ActivityEventCardProps> = ({
             {item.badgeText}
           </Text>
         ) : (
-          <Ionicons name={meta.icon} size={18} color={item.accentColor} />
+          <Ionicons
+            name={isFreeDayItem ? 'sunny-outline' : meta.icon}
+            size={18}
+            color={item.accentColor}
+          />
         )}
       </View>
 

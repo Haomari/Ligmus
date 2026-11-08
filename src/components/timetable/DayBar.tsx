@@ -1,5 +1,16 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
 import { DaySchedule, TerminarzEvent } from '@/types/librus';
 import { formatWeekRangeLabel, parseISODate } from '@/utils/dates';
 import {
@@ -32,11 +43,22 @@ export const DayBar: React.FC<DayBarProps> = ({
   onNextWeek,
   onJumpToToday,
 }) => {
+  const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const effectiveBottomInset = getEffectiveBottomInset(
+    insets.bottom,
+    isWideScreen
+  );
+  const bottomOffset = isWideScreen ? effectiveBottomInset + 14 : 14;
+
   const isCurrentDefaultWeek = weekStart === initialWeekStart;
   const weekLabel = formatWeekRangeLabel(weekStart);
 
   return (
-    <View style={styles.wrapper} pointerEvents="box-none">
+    <View
+      style={[styles.wrapper, { bottom: bottomOffset }]}
+      pointerEvents="box-none">
       <Pressable
         onPress={onJumpToToday}
         style={({ pressed }) => [
@@ -54,7 +76,7 @@ export const DayBar: React.FC<DayBarProps> = ({
         </Text>
       </Pressable>
 
-      <View style={styles.pillBar}>
+      <View style={[styles.pillBar, isWideScreen && styles.pillBarWide]}>
         <Pressable
           onPress={onPrevWeek}
           hitSlop={8}
@@ -68,22 +90,33 @@ export const DayBar: React.FC<DayBarProps> = ({
             const isToday = day.date === todayIso;
             const dayNum = parseISODate(day.date).getDate();
 
+            const regLessons = day.lessons.filter((l) => !l.isStandaloneEvent);
+            const isFreeOrAllCancelled = Boolean(
+              day.isFreeDay ||
+                regLessons.some((l) => l.isFreeDay) ||
+                (regLessons.length > 0 && regLessons.every((l) => l.isCancelled))
+            );
+
             const lessonEvents = day.lessons.flatMap((l) => l.events ?? []);
             const directDayEvents =
               terminarzEvents?.filter((ev) => ev.date === day.date) ?? [];
             const combinedEvents =
               lessonEvents.length > 0 ? lessonEvents : directDayEvents;
             const primaryEvent = getDayPrimaryTerminarzEvent(combinedEvents);
-            const eventColor = primaryEvent
-              ? getTerminarzColor(primaryEvent.category)
-              : null;
+            const eventColor = isFreeOrAllCancelled
+              ? '#ef4444'
+              : primaryEvent
+                ? getTerminarzColor(primaryEvent.category)
+                : null;
 
             const activeBorderColor =
-              eventColor === '#38bdf8' && isSelected
-                ? '#bae6fd'
-                : eventColor === '#94a3b8' && isSelected
-                  ? '#e2e8f0'
-                  : eventColor;
+              eventColor === '#ef4444' && isSelected
+                ? '#fca5a5'
+                : eventColor === '#38bdf8' && isSelected
+                  ? '#bae6fd'
+                  : eventColor === '#94a3b8' && isSelected
+                    ? '#e2e8f0'
+                    : eventColor;
 
             return (
               <Pressable
@@ -184,6 +217,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35,
     shadowRadius: 12,
     elevation: 8,
+  },
+  pillBarWide: {
+    width: '100%',
+    maxWidth: 560,
   },
   arrowBtn: {
     width: 34,

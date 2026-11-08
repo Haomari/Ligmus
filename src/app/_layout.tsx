@@ -17,6 +17,7 @@ import {
   syncBackgroundRegistrationWithSettings,
 } from '@/services/backgroundSync';
 import { checkForAppUpdate, UpdateCheckResult } from '@/services/updateService';
+import { getAutoUpdateEnabled, saveAutoUpdateEnabled } from '@/services/fileCache';
 import { UpdateModal } from '@/components/update-modal';
 
 SplashScreen.preventAutoHideAsync();
@@ -63,9 +64,12 @@ export default function TabLayout() {
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(() => {
+      if (!getAutoUpdateEnabled()) {
+        return;
+      }
       checkForAppUpdate()
         .then((res) => {
-          if (!cancelled && res.updateAvailable) {
+          if (!cancelled && res.updateAvailable && getAutoUpdateEnabled()) {
             setAvailableUpdate(res);
           }
         })
@@ -95,6 +99,8 @@ export default function TabLayout() {
           <UpdateModal
             visible={Boolean(availableUpdate)}
             updateInfo={availableUpdate}
+            triggerSource="auto"
+            onDisableAutoUpdate={() => saveAutoUpdateEnabled(false)}
             onClose={() => setAvailableUpdate(null)}
           />
         </LibrusProvider>

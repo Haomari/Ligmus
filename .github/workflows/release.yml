@@ -49,6 +49,9 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SHOULD_BUILD="true"
             echo "Manual workflow_dispatch triggered -> building ${TAG} (prerelease=${IS_PRERELEASE})"
+          elif [[ "${{ github.ref_name }}" == "beta-updates" && "$VERSION" != *"-"* ]]; then
+            SHOULD_BUILD="false"
+            echo "Stable version ${TAG} pushed to beta-updates -> skipping beta build so master merge publishes the stable release."
           else
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               -H "Accept: application/vnd.github+json" \
@@ -109,7 +112,11 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon -x lint -x test
+          ./gradlew assembleRelease --no-daemon -x lint -x test \
+            -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
+            -Pexpo.useLegacyPackaging=true \
+            -Pandroid.enableMinifyInReleaseBuilds=true \
+            -Pandroid.enableShrinkResourcesInReleaseBuilds=true
 
       - name: Prepare ligmus.apk
         run: cp android/app/build/outputs/apk/release/app-release.apk ligmus.apk
@@ -205,6 +212,46 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes from commit history
+        run: |
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${{ needs.check-version.outputs.tag }}$" | head -n 1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            RANGE="-n 10"
+          fi
+          node -e '
+            const { execSync } = require("child_process");
+            const fs = require("fs");
+            const range = process.argv[1];
+            const raw = execSync(`git log ${range} --format=%B%n---COMMIT_END---`, { encoding: "utf8" });
+            const blocks = raw.split("---COMMIT_END---").map(b => b.trim()).filter(Boolean);
+            const bullets = [];
+            const seen = new Set();
+            const add = (line) => {
+              const clean = line.replace(/^[-*•]\s+/, "").replace(/^(?:feat|fix|chore|refactor|perf|style|docs|ci|build)(?:\([^)]+\))?:\s*/i, "").trim();
+              if (!clean) return;
+              const k = clean.toLowerCase();
+              if (seen.has(k)) return;
+              seen.add(k);
+              bullets.push(`- ${clean}`);
+            };
+            for (const b of blocks) {
+              const lines = b.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+              if (!lines.length) continue;
+              const bodyBullets = lines.slice(1).filter(l => /^[-*•]\s+/.test(l));
+              if (bodyBullets.length) {
+                bodyBullets.forEach(add);
+              } else if (!/^merge\s+/i.test(lines[0])) {
+                add(lines[0]);
+              }
+            }
+            const out = bullets.length ? bullets.join("\n") : "- Poprawki błędów, optymalizacja działania oraz ulepszenia stabilności.";
+            fs.writeFileSync("RELEASE_NOTES.md", out + "\n", "utf8");
+          ' "$RANGE"
 
       - name: Download ligmus.apk
         uses: actions/download-artifact@v4
@@ -224,6 +271,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           prerelease: ${{ needs.check-version.outputs.is_prerelease == 'true' }}
           draft: false
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           files: |
             ligmus.apk

@@ -9,12 +9,14 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Directory } from 'expo-file-system';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { getEffectiveBottomInset, WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 import { useLibrus } from '@/context/LibrusContext';
 import { librusClient } from '@/services/librusClient';
 import {
@@ -28,10 +30,13 @@ import {
 import {
   DEFAULT_EXCUSE_PRESETS,
   formatDownloadFolderLabel,
+  getAutoUpdateEnabled,
   getCurrentSchoolYearId,
   getDownloadFolderUri,
   getExcusePresetsStore,
   getUpdateChannel,
+  onAutoUpdateSettingChange,
+  saveAutoUpdateEnabled,
   saveDownloadFolderUri,
   saveExcusePresetsStore,
   saveUpdateChannel,
@@ -54,6 +59,9 @@ const MAX_EXCUSE_PRESETS = 8;
 export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const effectiveBottomInset = getEffectiveBottomInset(insets.bottom, isWideScreen);
   const {
     student,
     hiddenTerminarzStore,
@@ -83,6 +91,9 @@ export default function SettingsScreen() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(() =>
     getUpdateChannel(APP_VERSION)
   );
+  const [autoUpdateEnabled, setAutoUpdateEnabled] = useState<boolean>(() =>
+    getAutoUpdateEnabled()
+  );
   const [clearingCache, setClearingCache] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -90,6 +101,9 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     getSyncSettings().then(setSyncSettings);
+    return onAutoUpdateSettingChange((next) => {
+      setAutoUpdateEnabled(next);
+    });
   }, []);
 
   useFocusEffect(
@@ -100,6 +114,7 @@ export default function SettingsScreen() {
         setExcuseStore(getExcusePresetsStore());
         setDownloadFolderUri(getDownloadFolderUri());
         setUpdateChannel(getUpdateChannel(APP_VERSION));
+        setAutoUpdateEnabled(getAutoUpdateEnabled());
       });
       return () => {
         active = false;
@@ -223,28 +238,44 @@ export default function SettingsScreen() {
   };
 
   const handleChangeUpdateChannel = async (channel: UpdateChannel) => {
-    if (channel === updateChannel) return;
+    const isRunningBeta = APP_VERSION.includes('-');
+    if (channel === updateChannel && !(channel === 'stable' && isRunningBeta)) {
+      return;
+    }
     setUpdateChannel(channel);
     saveUpdateChannel(channel);
-    if (channel === 'beta') {
-      setToastMessage('Kanał aktualizacji: Beta (nowe funkcje testowe)');
-      try {
+    setCheckingUpdate(true);
+    try {
+      if (channel === 'beta') {
+        setToastMessage('Kanał aktualizacji: Beta (nowe funkcje testowe)');
         const res = await checkForAppUpdate({ channelOverride: 'beta' });
         if (res.updateAvailable) {
           setUpdateModalInfo(res);
         }
-      } catch {
-        // Ignore network errors when switching channel
+      } else {
+        setToastMessage('Kanał aktualizacji: Stabilny');
+        const res = await checkForAppUpdate({
+          channelOverride: 'stable',
+          allowDowngradeToStable: true,
+        });
+        if (res.updateAvailable) {
+          setUpdateModalInfo(res);
+        }
       }
-    } else {
-      setToastMessage('Kanał aktualizacji: Stabilny');
+    } catch {
+      // Ignore network errors when switching channel
+    } finally {
+      setCheckingUpdate(false);
     }
   };
 
   const handleCheckForUpdates = async () => {
     setCheckingUpdate(true);
     try {
-      const res = await checkForAppUpdate({ channelOverride: updateChannel });
+      const res = await checkForAppUpdate({
+        channelOverride: updateChannel,
+        allowDowngradeToStable: updateChannel === 'stable',
+      });
       if (res.updateAvailable) {
         setUpdateModalInfo(res);
       } else {
@@ -369,7 +400,7 @@ export default function SettingsScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.container,
-          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          { paddingBottom: Math.max(effectiveBottomInset + 28, 44) },
         ]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}>
@@ -925,6 +956,31 @@ export default function SettingsScreen() {
 
             <View style={styles.divider} />
 
+            <View style={styles.switchRow}>
+              <View style={styles.switchTextCol}>
+                <Text style={styles.switchTitle}>Automatyczne aktualizacje</Text>
+                <Text style={styles.switchDesc}>
+                  Sprawdzaj dostępność nowych wersji automatycznie przy starcie aplikacji
+                </Text>
+              </View>
+              <Switch
+                value={autoUpdateEnabled}
+                onValueChange={(val) => {
+                  setAutoUpdateEnabled(val);
+                  saveAutoUpdateEnabled(val);
+                  setToastMessage(
+                    val
+                      ? 'Włączono automatyczne sprawdzanie aktualizacji'
+                      : 'Wyłączono automatyczne sprawdzanie aktualizacji'
+                  );
+                }}
+                thumbColor={autoUpdateEnabled ? '#38bdf8' : '#94a3b8'}
+                trackColor={{ false: '#334155', true: '#38bdf840' }}
+              />
+            </View>
+
+            <View style={styles.divider} />
+
             <TouchableOpacity
               style={styles.actionRow}
               disabled={checkingUpdate}
@@ -952,6 +1008,11 @@ export default function SettingsScreen() {
       <UpdateModal
         visible={Boolean(updateModalInfo)}
         updateInfo={updateModalInfo}
+        triggerSource="manual"
+        onDisableAutoUpdate={() => {
+          setAutoUpdateEnabled(false);
+          saveAutoUpdateEnabled(false);
+        }}
         onClose={() => setUpdateModalInfo(null)}
       />
       <ToastBanner message={toastMessage} onHide={() => setToastMessage(null)} />

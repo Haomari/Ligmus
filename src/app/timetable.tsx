@@ -29,11 +29,16 @@ import {
 import { TimeGrid } from '@/components/timetable/TimeGrid';
 import { DayBar } from '@/components/timetable/DayBar';
 import { LessonDetailsModal } from '@/components/lesson-details-modal';
+import {
+  FreeDayModal,
+  FreeDayModalTarget,
+} from '@/components/free-day-modal';
 import { getAllCachedWeeks, weekHasLessons } from '@/services/fileCache';
 import { librusClient } from '@/services/librusClient';
 import {
   attachTerminarzToDay,
   attachTerminarzToWeek,
+  cleanFreeDayReason,
   getDayActionableEvents,
   getTerminarzColor,
   TERMINARZ_PRIORITY,
@@ -57,7 +62,7 @@ interface ModalTargetState {
 }
 
 export default function TimetableScreen() {
-  const params = useLocalSearchParams<{ date?: string }>();
+  const params = useLocalSearchParams<{ date?: string; jumpTs?: string }>();
   const { width: windowWidth } = useWindowDimensions();
   const SCREEN_WIDTH =
     windowWidth >= WIDE_LAYOUT_BREAKPOINT
@@ -87,6 +92,8 @@ export default function TimetableScreen() {
   const [selectedDayIndex, setSelectedDayIndex] = useState<number>(initialDayIndex);
   const [isFetchingWeek, setIsFetchingWeek] = useState<boolean>(false);
   const [modalTarget, setModalTarget] = useState<ModalTargetState | null>(null);
+  const [freeDayModalTarget, setFreeDayModalTarget] =
+    useState<FreeDayModalTarget | null>(null);
 
   const pagerRef = useRef<FlatList<DaySchedule>>(null);
   const selectedDayIndexRef = useRef<number>(initialDayIndex);
@@ -118,39 +125,43 @@ export default function TimetableScreen() {
       if (programmaticTimerRef.current) {
         clearTimeout(programmaticTimerRef.current);
       }
-      if (animated) {
-        isProgrammaticScrollRef.current = true;
-        programmaticTimerRef.current = setTimeout(() => {
-          isProgrammaticScrollRef.current = false;
-        }, 420);
-      } else {
+      isProgrammaticScrollRef.current = true;
+      programmaticTimerRef.current = setTimeout(() => {
         isProgrammaticScrollRef.current = false;
-      }
+      }, 480);
 
       pagerRef.current?.scrollToOffset({
         offset: clamped * SCREEN_WIDTH,
         animated,
       });
+      setTimeout(() => {
+        pagerRef.current?.scrollToOffset({
+          offset: clamped * SCREEN_WIDTH,
+          animated: false,
+        });
+      }, 45);
     },
     [SCREEN_WIDTH]
   );
 
-  // Support deep-linking from "Ostatnia aktywność" via /timetable?date=YYYY-MM-DD
+  // Support deep-linking from "Ostatnia aktywność" and "Najbliższa lekcja" via /timetable?date=YYYY-MM-DD&jumpTs=...
   useEffect(() => {
     const rawDate = typeof params.date === 'string' ? params.date : '';
+    const jumpTs = typeof params.jumpTs === 'string' ? params.jumpTs : '';
     if (!rawDate || !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return;
-    if (handledDateParamRef.current === rawDate) return;
-    handledDateParamRef.current = rawDate;
+    const jumpKey = `${rawDate}:${jumpTs}`;
+    if (handledDateParamRef.current === jumpKey) return;
+    handledDateParamRef.current = jumpKey;
 
     const parsed = parseISODate(rawDate);
     const targetMon = toISODate(getMonday(parsed));
     const targetIdx = getSchoolDayIndex(parsed);
 
-    Promise.resolve().then(() => {
-      setActiveWeekStart(targetMon);
-      selectDay(targetIdx, false);
-    });
-  }, [params.date, selectDay]);
+    selectedDayIndexRef.current = targetIdx;
+    setSelectedDayIndex(targetIdx);
+    setActiveWeekStart(targetMon);
+    selectDay(targetIdx, false);
+  }, [params.date, params.jumpTs, selectDay]);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,6 +220,8 @@ export default function TimetableScreen() {
         const baseDay: DaySchedule = {
           ...d,
           date: dateStr,
+          isFreeDay: undefined,
+          freeDayLabel: undefined,
           lessons: d.lessons
             .filter((l) => !l.isStandaloneEvent)
             .map((l) => ({
@@ -217,6 +230,7 @@ export default function TimetableScreen() {
               attendance: undefined,
               topic: undefined,
               isCancelled: undefined,
+              isFreeDay: undefined,
               isSubstitution: undefined,
               changeType: undefined,
               note: undefined,
@@ -236,6 +250,35 @@ export default function TimetableScreen() {
   const headerDateLabel = activeDay?.date
     ? formatPolishDayHeader(activeDay.date)
     : activeDay?.dayName ?? '';
+
+  const activeRegularLessons = useMemo(
+    () => (activeDay?.lessons || []).filter((l) => !l.isStandaloneEvent),
+    [activeDay]
+  );
+  const isActiveDayFree = Boolean(
+    activeDay?.isFreeDay || activeRegularLessons.some((l) => l.isFreeDay)
+  );
+  const isAllRegularCancelled =
+    !isActiveDayFree &&
+    activeRegularLessons.length > 0 &&
+    activeRegularLessons.every((l) => l.isCancelled);
+  const showHeaderFreeBadge = isActiveDayFree || isAllRegularCancelled;
+
+  const freeDayReason = useMemo(() => {
+    if (!activeDay || !isActiveDayFree) return undefined;
+    const directFreeEv = terminarzEvents.find(
+      (ev) => ev.date === activeDay.date && ev.category === 'free_day'
+    );
+    return (
+      cleanFreeDayReason(directFreeEv?.displayType) ||
+      cleanFreeDayReason(directFreeEv?.rawType) ||
+      cleanFreeDayReason(directFreeEv?.description) ||
+      cleanFreeDayReason(activeDay.freeDayLabel) ||
+      cleanFreeDayReason(
+        activeRegularLessons.find((l) => l.isFreeDay && l.note)?.note
+      )
+    );
+  }, [activeDay, isActiveDayFree, terminarzEvents, activeRegularLessons]);
 
   // Build top-right scrollable Terminarz chips for the selected day
   const activeDayChips = useMemo<HeaderEventChip[]>(() => {
@@ -281,17 +324,21 @@ export default function TimetableScreen() {
     return chips;
   }, [activeDay, terminarzEvents]);
 
-  // Re-align horizontal day pager whenever foldable / window width changes
+  // Re-align horizontal day pager whenever foldable / window width or active week changes
   useEffect(() => {
     const idx = selectedDayIndexRef.current;
+    isProgrammaticScrollRef.current = true;
     const timer = setTimeout(() => {
       pagerRef.current?.scrollToOffset({
         offset: idx * SCREEN_WIDTH,
         animated: false,
       });
+      setTimeout(() => {
+        isProgrammaticScrollRef.current = false;
+      }, 120);
     }, 40);
     return () => clearTimeout(timer);
-  }, [SCREEN_WIDTH]);
+  }, [SCREEN_WIDTH, activeWeekStart]);
 
   const syncDayFromOffset = useCallback(
     (offsetX: number, clearProgrammatic: boolean) => {
@@ -431,6 +478,22 @@ export default function TimetableScreen() {
   const showInitialSpinner =
     (isLoading || isFetchingWeek) && !weeks[activeWeekStart];
 
+  useEffect(() => {
+    if (showInitialSpinner) return;
+    const idx = selectedDayIndexRef.current;
+    isProgrammaticScrollRef.current = true;
+    const timer = setTimeout(() => {
+      pagerRef.current?.scrollToOffset({
+        offset: idx * SCREEN_WIDTH,
+        animated: false,
+      });
+      setTimeout(() => {
+        isProgrammaticScrollRef.current = false;
+      }, 120);
+    }, 35);
+    return () => clearTimeout(timer);
+  }, [showInitialSpinner, SCREEN_WIDTH]);
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       {/* Header with Top-Right Scrollable Terminarz Event Chips */}
@@ -449,12 +512,36 @@ export default function TimetableScreen() {
           </Text>
         </View>
 
-        {activeDayChips.length > 0 && (
+        {(showHeaderFreeBadge || activeDayChips.length > 0) && (
           <View style={styles.headerEventsWrap}>
             <ScrollView
               nestedScrollEnabled
               showsVerticalScrollIndicator={false}
               contentContainerStyle={styles.headerEventsScroll}>
+              {showHeaderFreeBadge && (
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    if (activeDay?.date) {
+                      setFreeDayModalTarget({
+                        date: activeDay.date,
+                        reason: freeDayReason,
+                        showOpenTimetableButton: false,
+                      });
+                    }
+                  }}
+                  style={styles.headerFreeDayPill}>
+                  <View style={styles.headerFreeDayTopRow}>
+                    <View style={styles.headerFreeDayDot} />
+                    <Text style={styles.headerFreeDayTitle} numberOfLines={1}>
+                      {isActiveDayFree
+                        ? 'Dzień wolny od szkoły'
+                        : 'Wszystkie lekcje odwołane'}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              )}
+
               {activeDayChips.map((chip) => {
                 const color = getTerminarzColor(chip.event.category);
                 return (
@@ -593,6 +680,22 @@ export default function TimetableScreen() {
         initialExpandHideEventId={modalTarget?.expandHideEventId}
         onClose={() => setModalTarget(null)}
       />
+
+      {/* Free Day Details Modal */}
+      <FreeDayModal
+        visible={Boolean(freeDayModalTarget)}
+        target={freeDayModalTarget}
+        weeks={weeks}
+        terminarzEvents={terminarzEvents}
+        onClose={() => setFreeDayModalTarget(null)}
+        onNavigateToDate={(dateIso) => {
+          const parsed = parseISODate(dateIso);
+          const targetMon = toISODate(getMonday(parsed));
+          const targetIdx = getSchoolDayIndex(parsed);
+          setActiveWeekStart(targetMon);
+          selectDay(targetIdx, true);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -635,13 +738,47 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   headerEventsWrap: {
-    maxWidth: '52%',
-    maxHeight: 56,
+    maxWidth: '56%',
+    maxHeight: 68,
     flexShrink: 1,
   },
   headerEventsScroll: {
     alignItems: 'flex-end',
-    gap: 4,
+    gap: 5,
+  },
+  headerFreeDayPill: {
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    alignItems: 'flex-end',
+    gap: 1,
+  },
+  headerFreeDayTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  headerFreeDayDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#ef4444',
+  },
+  headerFreeDayTitle: {
+    color: '#fca5a5',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.15,
+  },
+  headerFreeDayReason: {
+    color: '#fecdd3',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'right',
+    lineHeight: 14,
   },
   headerEventChip: {
     flexDirection: 'row',

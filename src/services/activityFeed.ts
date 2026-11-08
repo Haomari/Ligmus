@@ -9,8 +9,9 @@ import {
 } from '@/types/librus';
 import { getActivityFeedStore, saveActivityFeedStore } from '@/services/fileCache';
 import { cleanLibrusPersonName } from '@/services/librusClient';
-import { getTerminarzColor } from '@/utils/terminarzMatcher';
-import { toISODate } from '@/utils/dates';
+import { isLessonFreeDay } from '@/services/timetableMapper';
+import { cleanFreeDayReason, getTerminarzColor } from '@/utils/terminarzMatcher';
+import { parseISODate, toISODate } from '@/utils/dates';
 
 export interface ActivitySyncInput {
   grades?: SubjectGrades[];
@@ -50,6 +51,45 @@ function parseSortableTimestamp(dateOrDateTime: string | undefined, fallbackMs: 
     if (!Number.isNaN(dayParsed)) return dayParsed;
   }
   return fallbackMs;
+}
+
+const POLISH_WEEKDAY_NAMES = [
+  'Niedziela',
+  'Poniedziałek',
+  'Wtorek',
+  'Środa',
+  'Czwartek',
+  'Piątek',
+  'Sobota',
+];
+
+function formatDateDMY(isoDate: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate;
+  return `${isoDate.slice(8, 10)}.${isoDate.slice(5, 7)}.${isoDate.slice(0, 4)}`;
+}
+
+function formatDateDM(isoDate: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate;
+  return `${isoDate.slice(8, 10)}.${isoDate.slice(5, 7)}`;
+}
+
+export function formatFreeDayRangeSubtitle(startDate: string, endDate: string): string {
+  if (startDate === endDate) {
+    const dt = parseISODate(startDate);
+    const weekday = POLISH_WEEKDAY_NAMES[dt.getDay()] || '';
+    return weekday
+      ? `${formatDateDMY(startDate)} (${weekday})`
+      : formatDateDMY(startDate);
+  }
+  const sameYear = startDate.slice(0, 4) === endDate.slice(0, 4);
+  const startLabel = sameYear ? formatDateDM(startDate) : formatDateDMY(startDate);
+  return `${startLabel} – ${formatDateDMY(endDate)}`;
+}
+
+function daysBetweenIso(startIso: string, endIso: string): number {
+  const a = parseISODate(startIso);
+  const b = parseISODate(endIso);
+  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
 }
 
 /**
@@ -197,13 +237,64 @@ export function reconcileActivityFeed(input: ActivitySyncInput): ActivityFeedIte
     );
   }
 
-  // 5. Timetable Changes (Cancelled & Substitutions on today or upcoming days)
+  // Collect all known free school days from Terminarz + Timetable
+  const allFreeDayDates = new Set<string>();
+  const upcomingFreeDayMap = new Map<
+    string,
+    { date: string; reason?: string; addedAt?: string; terminarzId?: string }
+  >();
+
+  for (const ev of input.terminarzEvents ?? []) {
+    if (!ev.date || ev.category !== 'free_day') continue;
+    allFreeDayDates.add(ev.date);
+    if (ev.date < todayIso) continue;
+    const cleanedReason = cleanFreeDayReason(ev.displayType || ev.description);
+    const existing = upcomingFreeDayMap.get(ev.date);
+    upcomingFreeDayMap.set(ev.date, {
+      date: ev.date,
+      reason: cleanedReason || existing?.reason,
+      addedAt: ev.addedAt || existing?.addedAt,
+      terminarzId: ev.id || existing?.terminarzId,
+    });
+  }
+
   const weeksList = Object.values(input.weeks ?? {});
   for (const wk of weeksList) {
     for (const day of wk.days ?? []) {
+      if (!day.date) continue;
+      const regularLessons = (day.lessons ?? []).filter((l) => !l.isStandaloneEvent);
+      const dayIsFree =
+        Boolean(day.isFreeDay) ||
+        (regularLessons.length > 0 &&
+          regularLessons.every((l) => Boolean(l.isFreeDay || isLessonFreeDay(l))));
+      if (!dayIsFree) continue;
+
+      allFreeDayDates.add(day.date);
+      if (day.date < todayIso) continue;
+
+      const existing = upcomingFreeDayMap.get(day.date);
+      const dayReason = cleanFreeDayReason(day.freeDayLabel);
+      upcomingFreeDayMap.set(day.date, {
+        date: day.date,
+        reason: existing?.reason || dayReason,
+        addedAt: existing?.addedAt,
+        terminarzId: existing?.terminarzId,
+      });
+    }
+  }
+
+  // 5. Timetable Changes (Cancelled & Substitutions on today or upcoming NON-free days)
+  for (const wk of weeksList) {
+    for (const day of wk.days ?? []) {
       if (!day.date || day.date < todayIso) continue;
+      // Never emit per-lesson "Odwołane" items on a school free day / holiday
+      const isFreeDay = Boolean(day.isFreeDay) || allFreeDayDates.has(day.date);
       for (const lesson of day.lessons ?? []) {
+        if (lesson.isStandaloneEvent) continue;
         if (lesson.isCancelled) {
+          if (isFreeDay || lesson.isFreeDay || isLessonFreeDay(lesson)) {
+            continue;
+          }
           considerCandidate(
             {
               id: `plan:${day.date}:${lesson.hourNumber}:${lesson.subject}:cancelled`,
@@ -219,7 +310,7 @@ export function reconcileActivityFeed(input: ActivitySyncInput): ActivityFeedIte
             },
             day.date === todayIso ? todayIso : ''
           );
-        } else if (lesson.isSubstitution) {
+        } else if (lesson.isSubstitution && !isFreeDay) {
           const subLabel =
             lesson.changeType === 'room'
               ? 'Zmiana sali'
@@ -244,6 +335,94 @@ export function reconcileActivityFeed(input: ActivitySyncInput): ActivityFeedIte
         }
       }
     }
+  }
+
+  // 5b. Grouped Free School Days (linked to Terminarz dates & holiday reason)
+  const sortedFreeDays = Array.from(upcomingFreeDayMap.values()).sort((a, b) =>
+    a.date.localeCompare(b.date)
+  );
+  interface FreeDayRangeGroup {
+    startDate: string;
+    endDate: string;
+    reason?: string;
+    addedAt?: string;
+    terminarzId?: string;
+  }
+  const freeDayGroups: FreeDayRangeGroup[] = [];
+  for (const entry of sortedFreeDays) {
+    const prev = freeDayGroups[freeDayGroups.length - 1];
+    const prevNormReason = (prev?.reason || '').trim().toLowerCase();
+    const currNormReason = (entry.reason || '').trim().toLowerCase();
+    // Merge only consecutive/adjacent school days (<= 3 days apart across weekend) with the same Terminarz reason
+    if (
+      prev &&
+      prevNormReason === currNormReason &&
+      daysBetweenIso(prev.endDate, entry.date) <= 3
+    ) {
+      prev.endDate = entry.date;
+      if (!prev.reason && entry.reason) prev.reason = entry.reason;
+      if (!prev.addedAt && entry.addedAt) prev.addedAt = entry.addedAt;
+      if (!prev.terminarzId && entry.terminarzId) prev.terminarzId = entry.terminarzId;
+    } else {
+      freeDayGroups.push({
+        startDate: entry.date,
+        endDate: entry.date,
+        reason: entry.reason,
+        addedAt: entry.addedAt,
+        terminarzId: entry.terminarzId,
+      });
+    }
+  }
+
+  const activeFreeDayRanges: {
+    startDate: string;
+    endDate: string;
+    reason?: string;
+    subtitle: string;
+    id: string;
+  }[] = [];
+  for (const group of freeDayGroups) {
+    const reasonSlug = (group.reason || 'free')
+      .toLowerCase()
+      .replace(/\s+/g, '_')
+      .slice(0, 40);
+    const groupId =
+      group.startDate === group.endDate
+        ? `free_day:${group.startDate}:${reasonSlug}`
+        : `free_day:${group.startDate}:${group.endDate}:${reasonSlug}`;
+    const subtitle = formatFreeDayRangeSubtitle(group.startDate, group.endDate);
+    activeFreeDayRanges.push({
+      startDate: group.startDate,
+      endDate: group.endDate,
+      reason: group.reason,
+      subtitle,
+      id: groupId,
+    });
+
+    const addedDate = extractDatePart(group.addedAt) || group.startDate;
+    const title = 'Dzień wolny od szkoły';
+
+    considerCandidate(
+      {
+        id: groupId,
+        kind: 'terminarz',
+        title,
+        subtitle,
+        badgeText: 'Wolne',
+        accentColor: '#ef4444',
+        date: group.startDate,
+        timestamp: parseSortableTimestamp(group.addedAt || group.startDate, nowMs),
+        targetRoute: '/timetable',
+        targetParams: {
+          date: group.startDate,
+          startDate: group.startDate,
+          endDate: group.endDate,
+          reason: group.reason || '',
+          openFreeDayModal: '1',
+        },
+      },
+      addedDate === todayIso || group.startDate === todayIso ? todayIso : addedDate
+    );
   }
 
   // 6. Newly Added Terminarz Tests / Events
@@ -277,12 +456,85 @@ export function reconcileActivityFeed(input: ActivitySyncInput): ActivityFeedIte
   // Sort newly discovered items newest-first
   discovered.sort((a, b) => b.timestamp - a.timestamp);
 
+  // Detect any legacy per-lesson ":cancelled" floods in store.items (e.g. >= 3 cancelled lessons on the same day or on a known free day)
+  const storedCancelledCountByDate = new Map<string, number>();
+  for (const oldItem of store.items) {
+    if (oldItem.id.startsWith('plan:') && oldItem.id.endsWith(':cancelled')) {
+      const d = oldItem.date;
+      if (d) {
+        storedCancelledCountByDate.set(d, (storedCancelledCountByDate.get(d) ?? 0) + 1);
+      }
+    }
+  }
+
+  let purgedOldItems = false;
+  const cleanedStoredItems = store.items
+    .filter((oldItem) => {
+      // Purge legacy per-lesson cancelled cards that belong to a free day or whole-day cancellation
+      if (oldItem.id.startsWith('plan:') && oldItem.id.endsWith(':cancelled')) {
+        const d = oldItem.date;
+        if (allFreeDayDates.has(d) || (storedCancelledCountByDate.get(d) ?? 0) >= 3) {
+          purgedOldItems = true;
+          return false;
+        }
+      }
+      // Purge older partial free_day cards that are now superseded by a wider/updated FreeDayRangeGroup
+      if (oldItem.id.startsWith('free_day:')) {
+        const superseded = activeFreeDayRanges.some(
+          (r) =>
+            r.id !== oldItem.id &&
+            oldItem.date >= r.startDate &&
+            oldItem.date <= r.endDate
+        );
+        if (superseded) {
+          purgedOldItems = true;
+          return false;
+        }
+      }
+      return true;
+    })
+    .map((oldItem) => {
+      if (oldItem.id.startsWith('free_day:')) {
+        const matchingRange = activeFreeDayRanges.find(
+          (r) =>
+            r.id === oldItem.id ||
+            (oldItem.date >= r.startDate && oldItem.date <= r.endDate)
+        );
+        const cleanSub = matchingRange
+          ? matchingRange.subtitle
+          : oldItem.subtitle.replace(/^Terminarz\s*•\s*/i, '');
+        const nextParams: Record<string, string> = {
+          ...(oldItem.targetParams ?? {}),
+          date: matchingRange?.startDate || oldItem.date,
+          startDate: matchingRange?.startDate || oldItem.targetParams?.startDate || oldItem.date,
+          endDate: matchingRange?.endDate || oldItem.targetParams?.endDate || oldItem.date,
+          reason: matchingRange?.reason || oldItem.targetParams?.reason || '',
+          openFreeDayModal: '1',
+        };
+        if (
+          oldItem.title !== 'Dzień wolny od szkoły' ||
+          oldItem.subtitle !== cleanSub ||
+          oldItem.targetParams?.openFreeDayModal !== '1' ||
+          oldItem.targetParams?.reason !== nextParams.reason
+        ) {
+          purgedOldItems = true;
+          return {
+            ...oldItem,
+            title: 'Dzień wolny od szkoły',
+            subtitle: cleanSub,
+            targetParams: nextParams,
+          };
+        }
+      }
+      return oldItem;
+    });
+
   // Merge with existing stored items (deduplicated by ID), newest-first
   const existingMap = new Map<string, ActivityFeedItem>();
   for (const item of discovered) {
     existingMap.set(item.id, item);
   }
-  for (const oldItem of store.items) {
+  for (const oldItem of cleanedStoredItems) {
     if (!existingMap.has(oldItem.id)) {
       existingMap.set(oldItem.id, oldItem);
     }
@@ -292,7 +544,12 @@ export function reconcileActivityFeed(input: ActivitySyncInput): ActivityFeedIte
     .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, 150);
 
-  if (isInitialSeed || discovered.length > 0 || seenSet.size !== store.seenIds.length) {
+  if (
+    isInitialSeed ||
+    discovered.length > 0 ||
+    purgedOldItems ||
+    seenSet.size !== store.seenIds.length
+  ) {
     saveActivityFeedStore({
       seeded: true,
       seenIds: Array.from(seenSet),

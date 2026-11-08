@@ -53,6 +53,19 @@ export function isGenericOtherTerminarzEvent(event: TerminarzEvent): boolean {
 }
 
 export function normalizeTerminarzEvent(event: TerminarzEvent): TerminarzEvent {
+  if (event.category === 'free_day') {
+    const cleanReason =
+      cleanFreeDayReason(event.displayType) ||
+      cleanFreeDayReason(event.rawType) ||
+      cleanFreeDayReason(event.description);
+    if (cleanReason && cleanReason !== event.displayType) {
+      return {
+        ...event,
+        displayType: cleanReason,
+      };
+    }
+    return event;
+  }
   if (isGenericOtherTerminarzEvent(event) && event.category !== 'other') {
     return {
       ...event,
@@ -93,6 +106,35 @@ function capitalizeFirst(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/**
+ * Cleans a raw holiday / free-day label from Terminarz or Timetable:
+ * - Strips trailing school/class codes like ": T10 (5)" or ": 5 F T10 (5)"
+ * - Returns undefined if the remaining text is just a generic "Dzień wolny szkoły" placeholder,
+ *   so callers can distinguish a specific holiday reason ("Święto Niepodległości", "Ferie zimowe")
+ *   from a generic free-day flag.
+ */
+export function cleanFreeDayReason(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw
+    .replace(/\s+/g, ' ')
+    .replace(
+      /\s*[:\-–]\s*(?:[0-9]{1,2}\s*[A-Za-z]?\s*)?[A-Za-z0-9_.-]+\s*\(\d+\)\s*$/i,
+      ''
+    )
+    .replace(/\s*\(\d+\)\s*$/i, '')
+    .trim();
+
+  if (!cleaned) return undefined;
+
+  const isGeneric =
+    /^(?:dzie[ńn]\s+woln(?:y(?:\s+od\s+szko[łl]y|\s+szko[łl]y|\s+od\s+zaj[ęe][ćc]|\s+od\s+nauki)?)?|wolne(?:\s+od\s+zaj[ęe][ćc])?)$/i.test(
+      cleaned
+    );
+  if (isGeneric) return undefined;
+
+  return capitalizeFirst(cleaned);
+}
+
 export function classifyTerminarzType(
   rawType: string,
   description?: string
@@ -105,6 +147,28 @@ export function classifyTerminarzType(
   const lower = cleanRaw.toLowerCase();
   const descLower = (description || '').trim().toLowerCase();
   const combined = `${lower} ${descLower}`;
+
+  // 0. School free days / holidays ("Dzień wolny szkoły", "Święto", "Ferie", "Przerwa świąteczna")
+  if (
+    /(?:dzie[ńn]\s+woln|wolne\s+od\s+zaj|wolne\s+od\s+szko|[śs]wi[ęe]t|ferie|wakacj|przerwa\s+[śs]wi[ąa]t|dzie[ńn]\s+edukacji|bo[żz]e\s+cia[łl]o|wszystkich\s+[śs]wi[ęe]tych|trzech\s+kr[óo]li|wielkanoc|wigili)/i.test(
+      combined
+    )
+  ) {
+    const specificReason =
+      cleanFreeDayReason(cleanRaw) || cleanFreeDayReason(description);
+    const label =
+      specificReason ||
+      (cleanRaw && lower !== 'inna' && lower !== 'inne'
+        ? capitalizeFirst(cleanRaw)
+        : description?.trim()
+          ? capitalizeFirst(description.trim())
+          : 'Dzień wolny od szkoły');
+    return {
+      category: 'free_day',
+      shortLabel: 'Wolne',
+      displayType: label,
+    };
+  }
 
   // 1. Retakes ("Poprawa sprawdzianu", "Poprawa kartkówki", "Poprawa")
   if (/\bpopraw(a|ka|y|ę|ie|kowy|kowa|ienie)\b/i.test(combined)) {
@@ -518,7 +582,42 @@ export function attachTerminarzToDay(
   allEvents: TerminarzEvent[],
   knownLessonsForTeacherLookup?: TimetableLesson[]
 ): DaySchedule {
-  const baseLessons = (day.lessons || []).filter((l) => !l.isStandaloneEvent);
+  const rawBaseLessons = (day.lessons || []).filter((l) => !l.isStandaloneEvent);
+  const freeDayEvents = allEvents
+    .filter((e) => e.date === day.date && e.category === 'free_day')
+    .map(normalizeTerminarzEvent);
+  const freeDayLessonNote = rawBaseLessons.find(
+    (l) =>
+      l.isFreeDay ||
+      (l.note && /(?:woln|[śs]wi[ęe]t|feri|wakacj|przerw)/i.test(l.note))
+  )?.note;
+
+  const isDayFree = Boolean(
+    day.isFreeDay || freeDayEvents.length > 0 || freeDayLessonNote
+  );
+
+  // Prioritize the specific holiday/reason from Terminarz first (e.g. "Święto Niepodległości", "Ferie zimowe")
+  const specificHolidayReason = isDayFree
+    ? cleanFreeDayReason(freeDayEvents[0]?.displayType) ||
+      cleanFreeDayReason(freeDayEvents[0]?.rawType) ||
+      cleanFreeDayReason(freeDayEvents[0]?.description) ||
+      cleanFreeDayReason(day.freeDayLabel) ||
+      cleanFreeDayReason(freeDayLessonNote)
+    : undefined;
+
+  const resolvedFreeDayLabel = isDayFree
+    ? specificHolidayReason || 'Dzień wolny od szkoły'
+    : undefined;
+
+  const baseLessons = isDayFree
+    ? rawBaseLessons.map((l) => ({
+        ...l,
+        isFreeDay: true,
+        isCancelled: true,
+        attendance: undefined,
+        note: specificHolidayReason || l.note || 'Dzień wolny od szkoły',
+      }))
+    : rawBaseLessons;
 
   const dayEvents = allEvents
     .filter((e) => e.date === day.date && e.category !== 'free_day')
@@ -527,9 +626,25 @@ export function attachTerminarzToDay(
   if (dayEvents.length === 0) {
     const hadStandalone = (day.lessons || []).length !== baseLessons.length;
     const hadEvents = baseLessons.some((l) => l.events && l.events.length > 0);
-    if (!hadStandalone && !hadEvents) return day;
+    if (
+      !hadStandalone &&
+      !hadEvents &&
+      day.isFreeDay === (isDayFree || undefined) &&
+      day.freeDayLabel === resolvedFreeDayLabel
+    ) {
+      return isDayFree
+        ? {
+            ...day,
+            isFreeDay: true,
+            freeDayLabel: resolvedFreeDayLabel,
+            lessons: baseLessons,
+          }
+        : day;
+    }
     return {
       ...day,
+      isFreeDay: isDayFree || undefined,
+      freeDayLabel: resolvedFreeDayLabel,
       lessons: baseLessons.map((l) => {
         if (!l.events) return l;
         const copy = { ...l };
@@ -562,16 +677,41 @@ export function attachTerminarzToDay(
   const standaloneTiles: TimetableLesson[] = [];
 
   for (const ev of dayEvents) {
-    if (shouldRenderAsStandaloneTile(ev, baseLessons) || baseLessons.length === 0) {
-      const inferredSubj = ev.subject || inferSubjectForTeacher(ev.teacher);
-      standaloneTiles.push(buildStandaloneLessonTile(ev, bellHours, inferredSubj));
+    const matchResult = findTargetLessonForEvent(baseLessons, ev);
+    const targetIsCancelledOrFree = Boolean(
+      isDayFree || !matchResult || matchResult.lesson.isCancelled
+    );
+
+    if (
+      shouldRenderAsStandaloneTile(ev, baseLessons) ||
+      baseLessons.length === 0 ||
+      targetIsCancelledOrFree
+    ) {
+      const matchedLesson = matchResult?.lesson;
+      const inferredSubj =
+        ev.subject ||
+        matchedLesson?.subject ||
+        inferSubjectForTeacher(ev.teacher);
+      const effectiveEv: TerminarzEvent =
+        matchedLesson && ev.lessonNumber <= 0 && !ev.hasExplicitLessonZero
+          ? {
+              ...ev,
+              lessonNumber: matchedLesson.hourNumber,
+              startTime: ev.startTime || matchedLesson.startTime,
+              endTime: ev.endTime || matchedLesson.endTime,
+              classroom: ev.classroom || matchedLesson.classroom,
+            }
+          : matchedLesson && !ev.classroom && matchedLesson.classroom && ev.lessonNumber === matchedLesson.hourNumber
+            ? {
+                ...ev,
+                classroom: matchedLesson.classroom,
+              }
+            : ev;
+      standaloneTiles.push(buildStandaloneLessonTile(effectiveEv, bellHours, inferredSubj));
       continue;
     }
 
-    const matchResult = findTargetLessonForEvent(baseLessons, ev);
-    if (!matchResult) continue;
-
-    const { lesson: target, autoAdjustedFromLesson } = matchResult;
+    const { lesson: target, autoAdjustedFromLesson } = matchResult!;
     const enrichedEv: TerminarzEvent = {
       ...ev,
       ...(autoAdjustedFromLesson !== undefined ? { autoAdjustedFromLesson } : {}),
@@ -604,19 +744,29 @@ export function attachTerminarzToDay(
   if (standaloneTiles.length === 0) {
     return {
       ...day,
+      isFreeDay: isDayFree || undefined,
+      freeDayLabel: resolvedFreeDayLabel,
       lessons: updatedRegularLessons,
     };
   }
 
-  const combinedLessons = [...standaloneTiles, ...updatedRegularLessons].sort((a, b) => {
+  // Place standalone active tiles after regular lessons when startTime & hourNumber tie
+  // so they render on top of ghosted cancelled/free-day lessons
+  const combinedLessons = [...updatedRegularLessons, ...standaloneTiles].sort((a, b) => {
     const aStart = parseHM(a.startTime || '08:00');
     const bStart = parseHM(b.startTime || '08:00');
     if (aStart !== bStart) return aStart - bStart;
-    return a.hourNumber - b.hourNumber;
+    if (a.hourNumber !== b.hourNumber) return a.hourNumber - b.hourNumber;
+    if (Boolean(a.isStandaloneEvent) !== Boolean(b.isStandaloneEvent)) {
+      return a.isStandaloneEvent ? 1 : -1;
+    }
+    return 0;
   });
 
   return {
     ...day,
+    isFreeDay: isDayFree || undefined,
+    freeDayLabel: resolvedFreeDayLabel,
     lessons: combinedLessons,
   };
 }

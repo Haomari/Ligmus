@@ -142,19 +142,14 @@ const CredentialsModalBody: React.FC<CredentialsModalBodyProps> = ({
                   borderColor: `${accentColor}4D`,
                 },
               ]}>
-              <Ionicons name="key-outline" size={22} color={accentColor} />
+              <Ionicons name="key-outline" size={20} color={accentColor} />
             </View>
 
             <View style={styles.headerTextCol}>
-              <Text style={styles.title}>
+              <Text style={styles.title} numberOfLines={1}>
                 {isExpiredAlert
                   ? 'Zaktualizuj hasło Librus'
                   : 'Zmień zapisane hasło'}
-              </Text>
-              <Text style={styles.subtitle}>
-                {isExpiredAlert
-                  ? 'Zapisane hasło przestało działać (np. po zmianie w Librusie). Wpisz nowe hasło — pamięć podręczna i szablony zostaną zachowane.'
-                  : 'Wprowadź aktualne dane logowania do konta Librus Synergia bez utraty danych lokalnych.'}
               </Text>
             </View>
 
@@ -166,6 +161,12 @@ const CredentialsModalBody: React.FC<CredentialsModalBodyProps> = ({
               <Ionicons name="close" size={18} color="#94a3b8" />
             </TouchableOpacity>
           </View>
+
+          <Text style={styles.subtitle} numberOfLines={1}>
+            {isExpiredAlert
+              ? 'Wpisz nowe hasło — dane offline zostaną zachowane.'
+              : 'Dane offline zostaną zachowane.'}
+          </Text>
 
           {/* Server rejection reason when triggered automatically */}
           {isExpiredAlert && invalidState?.message && !errorMessage ? (
@@ -421,21 +422,20 @@ const styles = StyleSheet.create({
   },
   headerRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
+    alignItems: 'center',
+    gap: 11,
   },
   iconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 2,
   },
   headerTextCol: {
     flex: 1,
-    gap: 4,
+    justifyContent: 'center',
   },
   title: {
     fontSize: 18,
@@ -444,8 +444,8 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     fontSize: 12.5,
-    lineHeight: 18,
     color: '#94a3b8',
+    marginTop: -4,
   },
   closeBtn: {
     width: 30,

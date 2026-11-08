@@ -13,7 +13,10 @@ import { useLocalSearchParams } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
 import { Grade, SubjectGrades } from '@/types/librus';
 import { GradeDetailsModal, getGradeColor } from '@/components/grade-details-modal';
-import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
 
 export default function GradesScreen() {
   const params = useLocalSearchParams<{ subjectId?: string; gradeId?: string }>();
@@ -193,7 +196,12 @@ export default function GradesScreen() {
         contentContainerStyle={[
           styles.listContainer,
           isWideScreen && styles.listContainerWide,
-          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          {
+            paddingBottom: Math.max(
+              getEffectiveBottomInset(insets.bottom, isWideScreen) + 28,
+              40
+            ),
+          },
         ]}
         showsVerticalScrollIndicator={false}
         refreshControl={

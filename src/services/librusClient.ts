@@ -27,6 +27,7 @@ import {
 } from '@/utils/dates';
 import { decodeHtmlEntities } from '@/utils/html';
 import {
+  applyInboxReadState,
   clearAllFileCaches,
   ensureSchoolYearCacheValid,
   formatYearMonthKey,
@@ -39,6 +40,7 @@ import {
   getCachedRealizations,
   getCachedTerminarzMonth,
   getCachedWeek,
+  markInboxMessageIdsRead,
   saveCachedAnnouncements,
   saveCachedAttendanceMarks,
   saveCachedAttendanceStats,
@@ -48,7 +50,10 @@ import {
   saveCachedTerminarzMonth,
   saveCachedWeek,
 } from '@/services/fileCache';
-import { classifyTerminarzType } from '@/utils/terminarzMatcher';
+import {
+  classifyTerminarzType,
+  cleanFreeDayReason,
+} from '@/utils/terminarzMatcher';
 import {
   ScrapedAttendanceSummary,
   classifyAttendanceSymbol,
@@ -1159,6 +1164,15 @@ class LibrusClient {
             .filter(Boolean);
           const flagText = flagMatches.join(', ');
           const flagLower = flagText.toLowerCase();
+          const isFreeDayFlag = /(?:woln|[śs]wi[ęe]t|feri|wakacj|przerw)/i.test(flagLower);
+
+          if (isFreeDayFlag) {
+            days[dayIdx].isFreeDay = true;
+            if (!days[dayIdx].freeDayLabel && flagText) {
+              days[dayIdx].freeDayLabel =
+                flagText.charAt(0).toUpperCase() + flagText.slice(1);
+            }
+          }
 
           // Find struck ranges
           const struckRanges: [number, number][] = [];
@@ -1214,10 +1228,12 @@ class LibrusClient {
           const struckEntry = entries.find((e) => e.struck);
           const primary = activeEntry || struckEntry!;
 
+          const isFreeDay = isFreeDayFlag;
           const isCancelled =
             !activeEntry ||
             flagLower.includes('odwołan') ||
-            flagLower.includes('odwolan');
+            flagLower.includes('odwolan') ||
+            isFreeDay;
 
           const hasOriginal = Boolean(activeEntry && struckEntry);
           const isSubstitution =
@@ -1256,6 +1272,7 @@ class LibrusClient {
             teacher: primary.teacher,
             classroom: primary.classroom,
             isCancelled: isCancelled || undefined,
+            isFreeDay: isFreeDay || undefined,
             isSubstitution: isSubstitution || undefined,
             changeType,
             original:
@@ -1274,7 +1291,8 @@ class LibrusClient {
       }
 
       const totalLessons = days.reduce((sum, d) => sum + d.lessons.length, 0);
-      if (totalLessons === 0) {
+      const hasAnyFreeDay = days.some((d) => d.isFreeDay);
+      if (totalLessons === 0 && !hasAnyFreeDay) {
         return null;
       }
 
@@ -1351,7 +1369,7 @@ class LibrusClient {
         const postExpired = this.isSessionExpired(postRes, postHtml);
         if (!postExpired) {
           const postWeek = this.parseTimetableFromHtml(postHtml, requestedMondayDate);
-          if (postWeek && postWeek.days.some((d) => d.lessons.length > 0)) {
+          if (postWeek && postWeek.days.some((d) => d.lessons.length > 0 || d.isFreeDay)) {
             return postWeek;
           }
         }
@@ -1367,12 +1385,15 @@ class LibrusClient {
           return {
             ...d,
             date: newDate,
+            isFreeDay: undefined,
+            freeDayLabel: undefined,
             lessons: d.lessons.map((l) => ({
               ...l,
               id: `${newDate}-${l.hourNumber}`,
               attendance: undefined,
               topic: undefined,
               isCancelled: undefined,
+              isFreeDay: undefined,
               isSubstitution: undefined,
               changeType: undefined,
               note: undefined,
@@ -2102,8 +2123,9 @@ class LibrusClient {
       }
 
       if (messages.length > 0) {
-        saveCachedMessages(folder, messages);
-        return messages;
+        const finalMessages = folder === 'inbox' ? applyInboxReadState(messages) : messages;
+        saveCachedMessages(folder, finalMessages);
+        return finalMessages;
       }
       // Distinguish a genuinely empty folder from an unauthenticated / redirect HTML shell
       if (/Brak\s+wiadomo[śs]ci|Nie\s+znaleziono\s+wiadomo[śs]ci/i.test(html)) {
@@ -2315,6 +2337,9 @@ class LibrusClient {
         attachments: attachments.length > 0 ? attachments : undefined,
       };
 
+      if (folderId === 5) {
+        markInboxMessageIdsRead([messageId]);
+      }
       saveCachedMessageDetail(detail);
       return detail;
     };
@@ -3167,23 +3192,75 @@ class LibrusClient {
 
         const dateIso = `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
 
-        // Limit scanning to the inner day table if present
-        const innerTableEnd = dayChunk.search(/<\/table>/i);
-        const dayScope = innerTableEnd !== -1 ? dayChunk.slice(0, innerTableEnd) : dayChunk;
+        // Strip anything after the calendar table ends (e.g. legend/footer after the last day of the month)
+        const footerStart = dayChunk.search(
+          /(?:<div\b[^>]*class="[^"]*\b(?:legend|kalendarz-legenda|komunikat)\b|<\/form>|<script\b)/i
+        );
+        const dayScope = footerStart !== -1 ? dayChunk.slice(0, footerStart) : dayChunk;
+
+        const FREE_DAY_KEYWORD_RE =
+          /(?:święt|swiet|dzień\s+woln|dzien\s+woln|dni\s+woln|wolne\s+od|ferie|wakacj|przerw[ay]\s+świąt|przerw[ay]\s+swiat|dyrektorsk|rekolekcj|boże\s+ciało|boze\s+cialo|wielkanoc|wigili|nowy\s+rok|trzech\s+król|trzech\s+krol|edukacji\s+narodowej|wszystkich\s+świętych|wszystkich\s+swietych|majówk|majowk)/i;
+        const SCHOOL_UNIT_SUFFIX_RE =
+          /:\s*(?:[0-9]{1,2}\s*[A-Za-z]?\s*)?[A-Za-z0-9_.-]+\s*\(\d+\)\s*$/i;
 
         const tdMatches = [...dayScope.matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)];
+        let freeSeq = 1;
+        let foundFreeDayForDate = false;
+
         for (const tdMatch of tdMatches) {
           const attrs = tdMatch[1] || '';
           const cellHtml = tdMatch[2] || '';
+          const combinedRawCell = `${attrs} ${cellHtml}`;
 
-          const detailMatch = attrs.match(/\/terminarz\/(szczegoly(?:_wolne)?)\/(\d+)/i);
-          if (!detailMatch) {
-            // Skip Odwołane zajęcia / Zastępstwo cells (already handled live by getWeek)
+          // Skip outer calendar grid cells that wrap another kalendarz-dzien
+          if (/kalendarz-numer-dnia|kalendarz-dzien/i.test(cellHtml)) {
             continue;
           }
 
-          const isFreeDay = detailMatch[1].toLowerCase() === 'szczegoly_wolne';
-          const rawId = detailMatch[2];
+          const cellLines = decodeHtmlEntities(cellHtml, {
+            stripTags: true,
+            preserveNewlines: true,
+          })
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean);
+
+          if (cellLines.length === 0) continue;
+          const fullCellText = cellLines.join(' ');
+
+          // Skip Odwołane zajęcia / Zastępstwo / Przesunięcie cells (already handled live by getWeek)
+          if (
+            /(?:odwołan|odwolan|zastępstw|zastepstw|przesuni)/i.test(
+              fullCellText
+            )
+          ) {
+            continue;
+          }
+
+          const detailMatch = combinedRawCell.match(
+            /\/terminarz\/(szczegoly(?:_[a-z0-9]+)?)\/(\d+)/i
+          );
+
+          const hasLessonMeta =
+            /Nr\s+lekcji\s*:|Przedmiot\s*:|Nauczyciel\s*:/i.test(fullCellText) ||
+            /<span\b[^>]*class="[^"]*\bprzedmiot\b/i.test(cellHtml);
+
+          const isKeywordFreeDay =
+            FREE_DAY_KEYWORD_RE.test(fullCellText) ||
+            (!hasLessonMeta && SCHOOL_UNIT_SUFFIX_RE.test(cellLines[0] || ''));
+
+          if (!detailMatch && !isKeywordFreeDay) {
+            continue;
+          }
+
+          const detailKind = detailMatch?.[1]?.toLowerCase() ?? '';
+          const isFreeDay =
+            detailKind.includes('wolne') ||
+            detailKind.includes('kalendarz') ||
+            (!detailMatch && isKeywordFreeDay) ||
+            (detailKind === 'szczegoly' && isKeywordFreeDay && !hasLessonMeta);
+
+          const rawId = detailMatch?.[2] ?? `kw${freeSeq++}`;
           const eventId = isFreeDay ? `free-${dateIso}-${rawId}` : `${rawId}-${dateIso}`;
           if (seenIds.has(eventId)) continue;
           seenIds.add(eventId);
@@ -3195,7 +3272,9 @@ class LibrusClient {
           let addedAt: string | undefined;
           let tooltipSubject: string | undefined;
 
-          const titleAttrMatch = attrs.match(/\btitle=(["'])([\s\S]*?)\1/i);
+          const titleAttrMatch =
+            attrs.match(/\btitle=(["'])([\s\S]*?)\1/i) ||
+            cellHtml.match(/\btitle=(["'])([\s\S]*?)\1/i);
           if (titleAttrMatch && titleAttrMatch[2]) {
             const decodedTooltip = decodeHtmlEntities(titleAttrMatch[2], {
               stripTags: true,
@@ -3233,14 +3312,6 @@ class LibrusClient {
             }
           }
 
-          const cellLines = decodeHtmlEntities(cellHtml, {
-            stripTags: true,
-            preserveNewlines: true,
-          })
-            .split('\n')
-            .map((l) => l.trim())
-            .filter(Boolean);
-
           const lessonNumLine = cellLines.find((l) => /^Nr\s+lekcji\s*:/i.test(l));
           const lessonNumMatch = lessonNumLine?.match(/Nr\s+lekcji\s*:\s*(\d+)/i);
           const parsedLessonNum = lessonNumMatch ? parseInt(lessonNumMatch[1], 10) : null;
@@ -3276,16 +3347,21 @@ class LibrusClient {
             : tooltipSubject;
 
           if (isFreeDay) {
-            const freeLabel = cellLines[0] || description || 'Dzień wolny od zajęć';
+            foundFreeDayForDate = true;
+            const rawFreeLabel = cellLines[0] || description || 'Dzień wolny od szkoły';
+            const cleanedFreeLabel =
+              cleanFreeDayReason(rawFreeLabel) ||
+              cleanFreeDayReason(description) ||
+              rawFreeLabel;
             events.push({
               id: eventId,
               date: dateIso,
               lessonNumber: 0,
-              rawType: freeLabel,
-              displayType: freeLabel,
+              rawType: rawFreeLabel,
+              displayType: cleanedFreeLabel,
               shortLabel: 'Wolne',
               category: 'free_day',
-              description,
+              description: cleanFreeDayReason(description) || description,
               teacher,
               addedAt,
             });
@@ -3327,6 +3403,46 @@ class LibrusClient {
             description,
             addedAt,
           });
+        }
+
+        // Fallback: if no free day was found in <td>, check any standalone <div>/text inside kalendarz-dzien
+        if (!foundFreeDayForDate) {
+          const nonTdHtml = dayScope
+            .replace(
+              /<div\b[^>]*class="[^"]*\bkalendarz-numer-dnia\b[^"]*"[^>]*>[\s\S]*?<\/div>/gi,
+              ''
+            )
+            .replace(/<td\b[^>]*>[\s\S]*?<\/td>/gi, '');
+          const nonTdLines = decodeHtmlEntities(nonTdHtml, {
+            stripTags: true,
+            preserveNewlines: true,
+          })
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.length > 2 && !/^\d{1,2}$/.test(l));
+
+          for (const line of nonTdLines) {
+            if (/(?:odwołan|odwolan|zastępstw|zastepstw|przesuni)/i.test(line)) {
+              continue;
+            }
+            if (FREE_DAY_KEYWORD_RE.test(line) || SCHOOL_UNIT_SUFFIX_RE.test(line)) {
+              const eventId = `free-${dateIso}-div${freeSeq++}`;
+              if (!seenIds.has(eventId)) {
+                seenIds.add(eventId);
+                const cleanedFreeLabel = cleanFreeDayReason(line) || line;
+                events.push({
+                  id: eventId,
+                  date: dateIso,
+                  lessonNumber: 0,
+                  rawType: line,
+                  displayType: cleanedFreeLabel,
+                  shortLabel: 'Wolne',
+                  category: 'free_day',
+                });
+                break;
+              }
+            }
+          }
         }
       }
 

@@ -34,6 +34,7 @@ const UPDATE_SETTINGS_FILE = 'update_settings.json';
 const TERMINARZ_INDEX_FILE = 'terminarz_index.json';
 const ANNOUNCEMENTS_FILE = 'announcements.json';
 const READ_ANNOUNCEMENTS_FILE = 'read_announcements.json';
+const READ_INBOX_MESSAGES_FILE = 'read_inbox_messages.json';
 const ACTIVITY_FEED_FILE = 'activity_feed.json';
 const HIDDEN_TERMINARZ_FILE = 'hidden_terminarz.json';
 
@@ -295,7 +296,47 @@ export function saveCachedAttendanceStats(stats: AttendanceStats): void {
   writeJsonSync(ATTENDANCE_STATS_FILE, stats);
 }
 
-// --- Messages Cache ---
+// --- Messages Cache & Local Read Tracking ---
+
+interface ReadInboxMessagesStore {
+  ids: string[];
+}
+
+export function getReadInboxMessagesStore(): ReadInboxMessagesStore {
+  const saved = readJsonSync<Partial<ReadInboxMessagesStore>>(READ_INBOX_MESSAGES_FILE);
+  if (!saved) {
+    return { ids: [] };
+  }
+  return {
+    ids: Array.isArray(saved.ids) ? saved.ids : [],
+  };
+}
+
+export function saveReadInboxMessagesStore(store: ReadInboxMessagesStore): void {
+  writeJsonSync(READ_INBOX_MESSAGES_FILE, {
+    ids: capTail(Array.from(new Set(store.ids)), 1000),
+  });
+}
+
+export function applyInboxReadState(messages: LibrusMessageSummary[]): LibrusMessageSummary[] {
+  if (!messages || messages.length === 0) return [];
+  const store = getReadInboxMessagesStore();
+  if (store.ids.length === 0) return messages;
+  const readSet = new Set(store.ids);
+  return messages.map((m) => (readSet.has(m.id) ? { ...m, isUnread: false } : m));
+}
+
+export function markInboxMessageIdsRead(ids: string[]): void {
+  if (!ids || ids.length === 0) return;
+  const store = getReadInboxMessagesStore();
+  const merged = new Set(store.ids);
+  for (const id of ids) {
+    if (id) merged.add(id);
+  }
+  saveReadInboxMessagesStore({
+    ids: Array.from(merged),
+  });
+}
 
 export function getCachedMessages(folder: MessageFolder): LibrusMessageSummary[] {
   const file = folder === 'inbox' ? MESSAGES_INBOX_FILE : MESSAGES_SENT_FILE;
@@ -304,7 +345,7 @@ export function getCachedMessages(folder: MessageFolder): LibrusMessageSummary[]
     // Discard pre-fix cache where subject and date columns were swapped
     return [];
   }
-  return list;
+  return folder === 'inbox' ? applyInboxReadState(list) : list;
 }
 
 export function saveCachedMessages(
@@ -313,7 +354,8 @@ export function saveCachedMessages(
 ): void {
   if (!messages || messages.length === 0) return;
   const file = folder === 'inbox' ? MESSAGES_INBOX_FILE : MESSAGES_SENT_FILE;
-  writeJsonSync(file, messages);
+  const normalized = folder === 'inbox' ? applyInboxReadState(messages) : messages;
+  writeJsonSync(file, normalized);
 }
 
 function messageDetailFileName(folderId: 5 | 6, messageId: string): string {
@@ -519,8 +561,16 @@ export function markExcuseDatesAsSent(dates: string[]): void {
   writeJsonSync(SENT_EXCUSE_DATES_FILE, Array.from(existing).sort());
 }
 
+interface UpdateSettingsStore {
+  channel?: UpdateChannel;
+  autoUpdateEnabled?: boolean;
+}
+
+type AutoUpdateListener = (enabled: boolean) => void;
+const autoUpdateListeners = new Set<AutoUpdateListener>();
+
 export function getUpdateChannel(currentAppVersion?: string): UpdateChannel {
-  const saved = readJsonSync<{ channel?: string }>(UPDATE_SETTINGS_FILE);
+  const saved = readJsonSync<UpdateSettingsStore>(UPDATE_SETTINGS_FILE);
   if (saved?.channel === 'beta' || saved?.channel === 'stable') {
     return saved.channel;
   }
@@ -531,7 +581,41 @@ export function getUpdateChannel(currentAppVersion?: string): UpdateChannel {
 }
 
 export function saveUpdateChannel(channel: UpdateChannel): void {
-  writeJsonSync(UPDATE_SETTINGS_FILE, { channel });
+  const existing = readJsonSync<UpdateSettingsStore>(UPDATE_SETTINGS_FILE) ?? {};
+  writeJsonSync(UPDATE_SETTINGS_FILE, {
+    ...existing,
+    channel,
+  });
+}
+
+export function getAutoUpdateEnabled(): boolean {
+  const saved = readJsonSync<UpdateSettingsStore>(UPDATE_SETTINGS_FILE);
+  if (typeof saved?.autoUpdateEnabled === 'boolean') {
+    return saved.autoUpdateEnabled;
+  }
+  return true;
+}
+
+export function saveAutoUpdateEnabled(enabled: boolean): void {
+  const existing = readJsonSync<UpdateSettingsStore>(UPDATE_SETTINGS_FILE) ?? {};
+  writeJsonSync(UPDATE_SETTINGS_FILE, {
+    ...existing,
+    autoUpdateEnabled: enabled,
+  });
+  for (const listener of autoUpdateListeners) {
+    try {
+      listener(enabled);
+    } catch {
+      // Ignore listener error
+    }
+  }
+}
+
+export function onAutoUpdateSettingChange(listener: AutoUpdateListener): () => void {
+  autoUpdateListeners.add(listener);
+  return () => {
+    autoUpdateListeners.delete(listener);
+  };
 }
 
 // --- Terminarz Cache ---
@@ -689,8 +773,11 @@ export function clearDataCachesOnly(): void {
   const savedExcusePresets = readJsonSync<ExcusePresetsStore>(EXCUSE_PRESETS_FILE);
   const savedDownloadSettings = readJsonSync<{ folderUri?: string | null }>(DOWNLOAD_SETTINGS_FILE);
   const savedNotifiedState = readJsonSync<NotifiedSyncState>(NOTIFIED_SYNC_STATE_FILE);
-  const savedUpdateSettings = readJsonSync<{ channel?: string }>(UPDATE_SETTINGS_FILE);
+  const savedUpdateSettings = readJsonSync<{ channel?: string; autoUpdateEnabled?: boolean }>(
+    UPDATE_SETTINGS_FILE
+  );
   const savedReadAnnouncements = readJsonSync<ReadAnnouncementsStore>(READ_ANNOUNCEMENTS_FILE);
+  const savedReadInboxMessages = readJsonSync<ReadInboxMessagesStore>(READ_INBOX_MESSAGES_FILE);
   const savedHiddenTerminarz = readJsonSync<HiddenTerminarzStore>(HIDDEN_TERMINARZ_FILE);
   clearAllFileCaches();
   if (savedExcuseSettings) {
@@ -710,6 +797,9 @@ export function clearDataCachesOnly(): void {
   }
   if (savedReadAnnouncements) {
     writeJsonSync(READ_ANNOUNCEMENTS_FILE, savedReadAnnouncements);
+  }
+  if (savedReadInboxMessages) {
+    writeJsonSync(READ_INBOX_MESSAGES_FILE, savedReadInboxMessages);
   }
   if (savedHiddenTerminarz) {
     writeJsonSync(HIDDEN_TERMINARZ_FILE, savedHiddenTerminarz);

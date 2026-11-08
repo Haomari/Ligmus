@@ -11,11 +11,16 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams } from 'expo-router';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
 import { useLibrus } from '@/context/LibrusContext';
 import {
   LibrusMessageDetail,
@@ -47,6 +52,12 @@ function normalizeSubjectKey(raw?: string): string {
 
 export default function MessagesScreen() {
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const listBottomPadding = Math.max(
+    getEffectiveBottomInset(insets.bottom, isWideScreen) + 28,
+    40
+  );
   const params = useLocalSearchParams<{
     autoExcuse?: string;
     tab?: string;
@@ -63,6 +74,7 @@ export default function MessagesScreen() {
     loadMessages,
     loadAnnouncements,
     markMessageAsReadLocal,
+    markAllMessagesReadLocal,
     markAnnouncementAsReadLocal,
     markAllAnnouncementsReadLocal,
   } = useLibrus();
@@ -350,6 +362,15 @@ export default function MessagesScreen() {
           </Text>
 
           <View style={styles.headerActions}>
+            {tab === 'inbox' && unreadMessagesCount > 0 && (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={markAllMessagesReadLocal}
+                style={styles.markAllReadInboxBtn}>
+                <Ionicons name="checkmark-done-outline" size={18} color="#38bdf8" />
+              </TouchableOpacity>
+            )}
+
             {tab === 'announcements' && unreadAnnouncementsCount > 0 && (
               <TouchableOpacity
                 activeOpacity={0.85}
@@ -476,7 +497,7 @@ export default function MessagesScreen() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={[
             styles.listContent,
-            { paddingBottom: Math.max(insets.bottom + 24, 40) },
+            { paddingBottom: listBottomPadding },
           ]}
           refreshControl={
             <RefreshControl
@@ -545,7 +566,7 @@ export default function MessagesScreen() {
           keyExtractor={(item) => `${item.folderId}-${item.id}`}
           contentContainerStyle={[
             styles.listContent,
-            { paddingBottom: Math.max(insets.bottom + 24, 40) },
+            { paddingBottom: listBottomPadding },
           ]}
           refreshControl={
             <RefreshControl
@@ -872,6 +893,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  markAllReadInboxBtn: {
+    width: 40,
+    height: 42,
+    borderRadius: 13,
+    backgroundColor: 'rgba(56, 189, 248, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   markAllReadBtn: {
     width: 40,

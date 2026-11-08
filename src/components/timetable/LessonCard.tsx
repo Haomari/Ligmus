@@ -28,7 +28,8 @@ export const LessonCard: React.FC<LessonCardProps> = ({
   onLongPress,
 }) => {
   const isStandalone = Boolean(lesson.isStandaloneEvent);
-  const isCancelled = !isStandalone && Boolean(lesson.isCancelled);
+  const isFreeDay = !isStandalone && Boolean(lesson.isFreeDay);
+  const isCancelled = !isStandalone && Boolean(lesson.isCancelled || isFreeDay);
   const isSubstitution = !isStandalone && !isCancelled && Boolean(lesson.isSubstitution);
 
   // Odwołane and Zastępstwo take top priority over Terminarz test outlines/badges
@@ -49,22 +50,24 @@ export const LessonCard: React.FC<LessonCardProps> = ({
   const subjectColor =
     isStandalone && eventColor ? eventColor : getSubjectColor(lesson.subject);
 
-  const changeTagLabel = isCancelled
-    ? 'Odwołane'
-    : isSubstitution
-      ? lesson.changeType === 'room'
-        ? 'Zmiana sali'
-        : lesson.changeType === 'moved'
-          ? 'Przesunięto'
-          : 'Zastępstwo'
-      : null;
+  const changeTagLabel = isFreeDay
+    ? 'Dzień wolny'
+    : isCancelled
+      ? 'Odwołane'
+      : isSubstitution
+        ? lesson.changeType === 'room'
+          ? 'Zmiana sali'
+          : lesson.changeType === 'moved'
+            ? 'Przesunięto'
+            : 'Zastępstwo'
+        : null;
 
   const outlineColor = isCancelled
-    ? 'rgba(239, 68, 68, 0.55)'
+    ? 'rgba(239, 68, 68, 0.42)'
     : isSubstitution
       ? 'rgba(245, 158, 11, 0.65)'
       : isStandalone && eventColor
-        ? `${eventColor}66`
+        ? `${eventColor}99`
         : hasGradedAssessmentOutline && eventColor
           ? eventColor
           : 'rgba(51, 65, 85, 0.55)';
@@ -234,12 +237,15 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   cardStandalone: {
-    backgroundColor: 'rgba(30, 41, 59, 0.52)',
-    opacity: 0.72,
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    opacity: 0.96,
+    zIndex: 10,
+    elevation: 4,
   },
   cardCancelled: {
-    backgroundColor: 'rgba(30, 41, 59, 0.5)',
-    opacity: 0.68,
+    backgroundColor: 'rgba(15, 23, 42, 0.36)',
+    opacity: 0.36,
+    zIndex: 1,
   },
   cardSubstitution: {
     backgroundColor: 'rgba(30, 41, 59, 0.95)',

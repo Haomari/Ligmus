@@ -77,6 +77,7 @@ export interface TimetableLesson {
   teacher: string;
   classroom: string;
   isCancelled?: boolean;
+  isFreeDay?: boolean;
   isSubstitution?: boolean;
   changeType?: 'substitution' | 'room' | 'moved' | null;
   original?: {
@@ -96,6 +97,8 @@ export interface DaySchedule {
   dayName: string;
   shortName: string;
   date: string; // "YYYY-MM-DD"
+  isFreeDay?: boolean;
+  freeDayLabel?: string;
   lessons: TimetableLesson[];
 }
 

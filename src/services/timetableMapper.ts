@@ -56,6 +56,15 @@ export function classifyAttendanceSymbol(
   return { kind: 'other', defaultName: rawName || rawSymbol };
 }
 
+export function isLessonFreeDay(lesson: {
+  isFreeDay?: boolean;
+  note?: string;
+}): boolean {
+  if (lesson.isFreeDay) return true;
+  if (!lesson.note) return false;
+  return /(?:woln|[śs]wi[ęe]t|feri|wakacj|przerw)/i.test(lesson.note);
+}
+
 /**
  * Merges attendance marks and lesson realizations into a WeekSchedule.
  * Uses multi-pass matching per day:
@@ -102,6 +111,32 @@ export function mergeAttendanceAndTopics(
   return {
     ...week,
     days: week.days.map((day) => {
+      const normalizedLessons = day.lessons
+        .filter((l) => !l.isStandaloneEvent)
+        .map((lesson) => {
+          const freeDay = Boolean(day.isFreeDay || isLessonFreeDay(lesson));
+          const cancelled = Boolean(lesson.isCancelled || freeDay);
+          return {
+            ...lesson,
+            isFreeDay: freeDay || undefined,
+            isCancelled: cancelled || undefined,
+          };
+        });
+
+      const freeDaySourceNote = normalizedLessons.find(
+        (l) => l.isFreeDay && l.note
+      )?.note;
+      const isDayFree = Boolean(
+        day.isFreeDay || normalizedLessons.some((l) => l.isFreeDay)
+      );
+      const resolvedFreeDayLabel = isDayFree
+        ? day.freeDayLabel ||
+          (freeDaySourceNote
+            ? freeDaySourceNote.charAt(0).toUpperCase() +
+              freeDaySourceNote.slice(1)
+            : 'Dzień wolny szkoły')
+        : undefined;
+
       const isPastDay = Boolean(day.date && day.date < todayIso);
       const isToday = day.date === todayIso;
       const dayMarks = day.date ? marksByDate.get(day.date) ?? [] : [];
@@ -110,7 +145,8 @@ export function mergeAttendanceAndTopics(
       const assignedByLessonIdx = new Map<number, AttendanceMark>();
 
       // Pass 1: Exact hourNumber match
-      day.lessons.forEach((lesson, lessonIdx) => {
+      normalizedLessons.forEach((lesson, lessonIdx) => {
+        if (lesson.isCancelled) return;
         const exact = dayMarks.find(
           (m) => !usedMarkIds.has(m.id) && m.hourNumber != null && m.hourNumber === lesson.hourNumber
         );
@@ -124,7 +160,7 @@ export function mergeAttendanceAndTopics(
       for (const m of dayMarks) {
         if (usedMarkIds.has(m.id) || !m.subject) continue;
         const targetSubj = m.subject.trim().toLowerCase();
-        const matchIdx = day.lessons.findIndex((lesson, idx) => {
+        const matchIdx = normalizedLessons.findIndex((lesson, idx) => {
           if (assignedByLessonIdx.has(idx) || lesson.isCancelled) return false;
           const lSubj = lesson.subject.trim().toLowerCase();
           return lSubj === targetSubj || lSubj.includes(targetSubj) || targetSubj.includes(lSubj);
@@ -141,7 +177,7 @@ export function mergeAttendanceAndTopics(
 
         // 3a: Check if school's 0-based box index made m.hourNumber = lesson.hourNumber - 1
         if (m.hourNumber != null) {
-          const plusOneIdx = day.lessons.findIndex(
+          const plusOneIdx = normalizedLessons.findIndex(
             (lesson, idx) =>
               !assignedByLessonIdx.has(idx) &&
               !lesson.isCancelled &&
@@ -158,9 +194,9 @@ export function mergeAttendanceAndTopics(
         if (
           m.hourNumber != null &&
           m.hourNumber >= 1 &&
-          m.hourNumber <= day.lessons.length &&
+          m.hourNumber <= normalizedLessons.length &&
           !assignedByLessonIdx.has(m.hourNumber - 1) &&
-          !day.lessons[m.hourNumber - 1].isCancelled
+          !normalizedLessons[m.hourNumber - 1].isCancelled
         ) {
           assignedByLessonIdx.set(m.hourNumber - 1, m);
           usedMarkIds.add(m.id);
@@ -170,16 +206,16 @@ export function mergeAttendanceAndTopics(
 
       return {
         ...day,
-        lessons: day.lessons
-          .filter((l) => !l.isStandaloneEvent)
-          .map((lesson, lessonIdx) => {
+        isFreeDay: isDayFree || undefined,
+        freeDayLabel: resolvedFreeDayLabel,
+        lessons: normalizedLessons.map((lesson, lessonIdx) => {
           const keyHour = `${day.date}#${lesson.hourNumber}`;
           const keySubj = `${day.date}#${lesson.subject.trim().toLowerCase()}`;
 
           const real = realByDateHour.get(keyHour) ?? realByDateSubject.get(keySubj);
           let mark = assignedByLessonIdx.get(lessonIdx);
 
-          if (!mark && real?.attendanceSymbol) {
+          if (!mark && !lesson.isCancelled && real?.attendanceSymbol) {
             const { kind, defaultName } = classifyAttendanceSymbol(real.attendanceSymbol);
             mark = {
               id: real.attendanceId || `real-${day.date}-${lesson.hourNumber}`,
@@ -194,7 +230,7 @@ export function mergeAttendanceAndTopics(
           }
 
           // Synthesize 'Obecność' (ob ✓) for completed non-cancelled lessons with no absence/late mark
-          if (!mark && !lesson.isCancelled && hasAttendanceLoaded) {
+          if (!mark && !lesson.isCancelled && !isDayFree && hasAttendanceLoaded) {
             const lessonEndMin = parseHM(lesson.endTime || '23:59');
             const hasCompleted =
               isPastDay || (isToday && lessonEndMin > 0 && lessonEndMin <= nowMinutes);
@@ -216,7 +252,7 @@ export function mergeAttendanceAndTopics(
           return {
             ...lesson,
             topic: rawTopic ? decodeHtmlEntities(rawTopic) : undefined,
-            attendance: mark,
+            attendance: lesson.isCancelled ? undefined : mark,
           };
         }),
       };
@@ -337,13 +373,23 @@ export function computeStats(
             }
           }
           if (!d.date) return;
+          const isDayFree = Boolean(
+            d.isFreeDay || regLessons.some((l) => isLessonFreeDay(l))
+          );
           if (d.date < todayIso) {
-            const activeCount = regLessons.filter((l) => !l.isCancelled).length;
+            const activeCount = isDayFree
+              ? 0
+              : regLessons.filter((l) => !l.isCancelled && !isLessonFreeDay(l)).length;
             exactDateCounts.set(d.date, activeCount);
           } else if (d.date === todayIso) {
-            const completedToday = regLessons.filter(
-              (l) => !l.isCancelled && parseHM(l.endTime || '23:59') <= nowMin
-            ).length;
+            const completedToday = isDayFree
+              ? 0
+              : regLessons.filter(
+                  (l) =>
+                    !l.isCancelled &&
+                    !isLessonFreeDay(l) &&
+                    parseHM(l.endTime || '23:59') <= nowMin
+                ).length;
             exactDateCounts.set(d.date, completedToday);
           }
         });
@@ -525,10 +571,15 @@ export function computeDetailedAttendance(
     if (!wk?.days) continue;
     wk.days.forEach((d, idx) => {
       const regLessons = d.lessons.filter((l) => !l.isStandaloneEvent);
-      const nonCancelledSubjects = regLessons
-        .filter((l) => !l.isCancelled && l.subject)
-        .map((l) => registerSubject(l.subject)!)
-        .filter(Boolean);
+      const isDayFree = Boolean(
+        d.isFreeDay || regLessons.some((l) => isLessonFreeDay(l))
+      );
+      const nonCancelledSubjects = isDayFree
+        ? []
+        : regLessons
+            .filter((l) => !l.isCancelled && !isLessonFreeDay(l) && l.subject)
+            .map((l) => registerSubject(l.subject)!)
+            .filter(Boolean);
 
       if (idx >= 0 && idx < 5) {
         const isPastOrToday = Boolean(d.date && d.date <= todayIso);
@@ -551,10 +602,18 @@ export function computeDetailedAttendance(
       if (d.date < todayIso) {
         exactDateSubjects.set(d.date, nonCancelledSubjects);
       } else if (d.date === todayIso) {
-        const completedToday = regLessons
-          .filter((l) => !l.isCancelled && l.subject && parseHM(l.endTime || '23:59') <= nowMin)
-          .map((l) => registerSubject(l.subject)!)
-          .filter(Boolean);
+        const completedToday = isDayFree
+          ? []
+          : regLessons
+              .filter(
+                (l) =>
+                  !l.isCancelled &&
+                  !isLessonFreeDay(l) &&
+                  l.subject &&
+                  parseHM(l.endTime || '23:59') <= nowMin
+              )
+              .map((l) => registerSubject(l.subject)!)
+              .filter(Boolean);
         exactDateSubjects.set(d.date, completedToday);
       }
     });

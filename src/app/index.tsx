@@ -17,6 +17,10 @@ import {
   ActivityFeedModal,
 } from '@/components/activity-feed-modal';
 import {
+  FreeDayModal,
+  FreeDayModalTarget,
+} from '@/components/free-day-modal';
+import {
   ActivityFeedItem,
   DaySchedule,
   TimetableLesson,
@@ -29,8 +33,23 @@ import {
   toISODate,
 } from '@/utils/dates';
 import { getAllCachedWeeks } from '@/services/fileCache';
+import { isLessonFreeDay } from '@/services/timetableMapper';
 import { getTerminarzColor } from '@/utils/terminarzMatcher';
-import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
+
+function isDayFreeOrLessonCancelled(
+  day: DaySchedule,
+  lesson: TimetableLesson
+): boolean {
+  if (day.isFreeDay) return true;
+  if (lesson.isCancelled || lesson.isFreeDay || isLessonFreeDay(lesson)) {
+    return true;
+  }
+  return false;
+}
 
 function findNextLesson(
   weeks: Record<string, WeekSchedule>,
@@ -38,12 +57,14 @@ function findNextLesson(
 ): {
   nextLesson: TimetableLesson | null;
   nextLessonDayLabel: string | null;
+  nextLessonDate: string | null;
 } {
   const now = new Date();
   const todayIso = toISODate(now);
   const nowMin = now.getHours() * 60 + now.getMinutes();
 
   const targetDate = getInitialSchoolDate(now);
+  const targetDateIso = toISODate(targetDate);
   const targetWeekStart = toISODate(getMonday(targetDate));
   const currentWeekStart = toISODate(getMonday(now));
 
@@ -53,12 +74,19 @@ function findNextLesson(
   // Check remaining non-cancelled regular lessons today first
   const todayDays = weeks[currentWeekStart]?.days ?? timetable ?? [];
   const todaySchedule = todayDays.find((d) => d.date === todayIso);
-  if (todaySchedule) {
+  if (todaySchedule && !todaySchedule.isFreeDay) {
     const upcomingToday = todaySchedule.lessons.find(
-      (l) => !l.isCancelled && !l.isStandaloneEvent && parseHM(l.endTime || '23:59') >= nowMin
+      (l) =>
+        !isDayFreeOrLessonCancelled(todaySchedule, l) &&
+        !l.isStandaloneEvent &&
+        parseHM(l.endTime || '23:59') >= nowMin
     );
     if (upcomingToday) {
-      return { nextLesson: upcomingToday, nextLessonDayLabel: 'Dzisiaj' };
+      return {
+        nextLesson: upcomingToday,
+        nextLessonDayLabel: 'Dzisiaj',
+        nextLessonDate: todaySchedule.date || todayIso,
+      };
     }
   }
 
@@ -80,23 +108,36 @@ function findNextLesson(
 
   // Find the first non-cancelled regular lesson on a future school day in target week
   for (const d of days) {
-    if (d.date > todayIso) {
-      const firstActive = d.lessons.find((l) => !l.isCancelled && !l.isStandaloneEvent);
+    if (d.date > todayIso && !d.isFreeDay) {
+      const firstActive = d.lessons.find(
+        (l) => !isDayFreeOrLessonCancelled(d, l) && !l.isStandaloneEvent
+      );
       if (firstActive) {
-        return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
+        return {
+          nextLesson: firstActive,
+          nextLessonDayLabel: d.dayName,
+          nextLessonDate: d.date || targetDateIso,
+        };
       }
     }
   }
 
   // Fallback to first non-cancelled regular lesson in days (e.g. Monday morning template)
   for (const d of days) {
-    const firstActive = d.lessons.find((l) => !l.isCancelled && !l.isStandaloneEvent);
+    if (d.isFreeDay) continue;
+    const firstActive = d.lessons.find(
+      (l) => !isDayFreeOrLessonCancelled(d, l) && !l.isStandaloneEvent
+    );
     if (firstActive) {
-      return { nextLesson: firstActive, nextLessonDayLabel: d.dayName };
+      return {
+        nextLesson: firstActive,
+        nextLessonDayLabel: d.dayName,
+        nextLessonDate: d.date || targetDateIso,
+      };
     }
   }
 
-  return { nextLesson: null, nextLessonDayLabel: null };
+  return { nextLesson: null, nextLessonDayLabel: null, nextLessonDate: null };
 }
 
 export default function HomeScreen() {
@@ -109,6 +150,7 @@ export default function HomeScreen() {
     student,
     timetable,
     weeks,
+    terminarzEvents,
     attendanceStats,
     activityFeed,
     isAuthenticated,
@@ -118,6 +160,8 @@ export default function HomeScreen() {
   } = useLibrus();
 
   const [activityModalVisible, setActivityModalVisible] = useState(false);
+  const [freeDayModalTarget, setFreeDayModalTarget] =
+    useState<FreeDayModalTarget | null>(null);
 
   React.useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -125,7 +169,10 @@ export default function HomeScreen() {
     }
   }, [isLoading, isAuthenticated, router]);
 
-  const { nextLesson } = useMemo(() => findNextLesson(weeks, timetable), [weeks, timetable]);
+  const { nextLesson, nextLessonDate } = useMemo(
+    () => findNextLesson(weeks, timetable),
+    [weeks, timetable]
+  );
 
   const attendanceColor = useMemo(() => {
     const pct = attendanceStats?.percent;
@@ -140,10 +187,28 @@ export default function HomeScreen() {
 
   const handleActivityPress = useCallback(
     (item: ActivityFeedItem) => {
+      if (
+        item.id.startsWith('free_day:') ||
+        item.badgeText === 'Wolne' ||
+        item.targetParams?.openFreeDayModal === '1'
+      ) {
+        setFreeDayModalTarget({
+          date: item.date,
+          startDate: item.targetParams?.startDate || item.date,
+          endDate: item.targetParams?.endDate || item.date,
+          reason: item.targetParams?.reason,
+          showOpenTimetableButton: true,
+        });
+        return;
+      }
+
       if (item.targetParams && Object.keys(item.targetParams).length > 0) {
         router.push({
           pathname: item.targetRoute as any,
-          params: item.targetParams,
+          params: {
+            ...item.targetParams,
+            jumpTs: String(Date.now()),
+          },
         });
       } else {
         router.push(item.targetRoute as any);
@@ -160,7 +225,12 @@ export default function HomeScreen() {
         contentContainerStyle={[
           styles.container,
           isCompactPhone && styles.containerCompact,
-          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          {
+            paddingBottom: Math.max(
+              getEffectiveBottomInset(insets.bottom, isWideScreen) + 28,
+              40
+            ),
+          },
         ]}
         showsVerticalScrollIndicator={false}
         refreshControl={
@@ -366,7 +436,17 @@ export default function HomeScreen() {
           {nextLesson ? (
             <TouchableOpacity
               activeOpacity={0.85}
-              onPress={() => router.push('/timetable' as any)}
+              onPress={() =>
+                router.push({
+                  pathname: '/timetable' as any,
+                  params: {
+                    date:
+                      nextLessonDate ||
+                      toISODate(getInitialSchoolDate(new Date())),
+                    jumpTs: String(Date.now()),
+                  },
+                })
+              }
               style={[styles.card, styles.lessonCard]}>
               <View style={styles.lessonTimeCol}>
                 <Text style={styles.lessonHour}>Lekcja {nextLesson.hourNumber}</Text>
@@ -480,6 +560,19 @@ export default function HomeScreen() {
         items={activityFeed}
         onClose={() => setActivityModalVisible(false)}
         onSelectItem={handleActivityPress}
+      />
+      <FreeDayModal
+        visible={Boolean(freeDayModalTarget)}
+        target={freeDayModalTarget}
+        weeks={weeks}
+        terminarzEvents={terminarzEvents}
+        onClose={() => setFreeDayModalTarget(null)}
+        onNavigateToDate={(dateIso) => {
+          router.push({
+            pathname: '/timetable' as any,
+            params: { date: dateIso, jumpTs: String(Date.now()) },
+          });
+        }}
       />
     </SafeAreaView>
   );

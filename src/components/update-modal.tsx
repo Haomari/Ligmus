@@ -24,12 +24,16 @@ export interface UpdateModalProps {
   visible: boolean;
   updateInfo: UpdateCheckResult | null;
   onClose: () => void;
+  triggerSource?: 'auto' | 'manual';
+  onDisableAutoUpdate?: () => void;
 }
 
 export const UpdateModal: React.FC<UpdateModalProps> = ({
   visible,
   updateInfo,
   onClose,
+  triggerSource = 'manual',
+  onDisableAutoUpdate,
 }) => {
   const [isDownloading, setIsDownloading] = useState(false);
   const [progressInfo, setProgressInfo] = useState<DownloadProgressInfo | null>(null);
@@ -67,10 +71,15 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
   const hasIpaAsset = Boolean(updateInfo.ipaUrl);
   const isPreview = Boolean(updateInfo.isPreview);
   const isBetaRelease = Boolean(updateInfo.isPrerelease);
+  const isDowngrade = Boolean(updateInfo.isDowngrade);
 
   const percent = Math.round((progressInfo?.progress ?? 0) * 100);
   const writtenMB = formatBytesToMB(progressInfo?.bytesWritten);
   const totalMB = formatBytesToMB(progressInfo?.totalBytes || packageSizeBytes);
+
+  const handleOpenReleasePage = async () => {
+    await openReleaseInBrowser(updateInfo.htmlUrl || updateInfo.compareUrl || null);
+  };
 
   const handlePrimaryAction = async () => {
     if (isDownloading) return;
@@ -84,7 +93,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
 
       setPreviewDone(false);
       setIsDownloading(true);
-      const totalBytes = updateInfo.apkSizeBytes ?? 44 * 1024 * 1024;
+      const totalBytes = updateInfo.apkSizeBytes ?? 103.9 * 1024 * 1024;
       let step = 0;
       const totalSteps = 12;
       setProgressInfo({ progress: 0, bytesWritten: 0, totalBytes });
@@ -138,8 +147,10 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
     } catch (err: any) {
       setIsDownloading(false);
       setErrorMessage(
-        err?.message ||
-          'Nie udało się uruchomić instalatora pakietu APK. Możesz pobrać aktualizację bezpośrednio w przeglądarce.'
+        isDowngrade
+          ? 'Jeśli system Android zablokuje instalację starszej wersji na nowszą Beta, pobierz plik APK w przeglądarce i zainstaluj go po odinstalowaniu wersji Beta.'
+          : err?.message ||
+              'Nie udało się uruchomić instalatora pakietu APK. Możesz pobrać plik bezpośrednio w przeglądarce.'
       );
     }
   };
@@ -149,6 +160,12 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
       ? updateInfo.ipaUrl || updateInfo.htmlUrl
       : updateInfo.apkUrl || updateInfo.htmlUrl;
     await openReleaseInBrowser(fallbackUrl);
+  };
+
+  const handleDisableAuto = () => {
+    if (isDownloading) return;
+    onDisableAutoUpdate?.();
+    handleCloseModal();
   };
 
   const showSubtitle =
@@ -175,10 +192,24 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
     : isPreview
       ? previewDone
         ? 'Przetestuj ponownie'
-        : 'Pobierz i zainstaluj'
+        : isDowngrade
+          ? `Pobierz ${latestTag}`
+          : 'Pobierz i zainstaluj'
       : hasApkAsset
-        ? 'Pobierz i zainstaluj'
+        ? isDowngrade
+          ? `Pobierz ${latestTag}`
+          : 'Pobierz i zainstaluj'
         : 'Otwórz stronę wydania';
+
+  const modalTitle = isPreview
+    ? isDowngrade
+      ? 'Podgląd powrotu do Stabilnej'
+      : 'Podgląd aktualizacji'
+    : isDowngrade
+      ? 'Powrót do wersji stabilnej'
+      : isBetaRelease
+        ? 'Dostępna aktualizacja Beta'
+        : 'Dostępna aktualizacja';
 
   return (
     <Modal
@@ -186,66 +217,108 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
       transparent
       animationType="fade"
       onRequestClose={handleCloseModal}>
-      <Pressable
-        style={styles.backdrop}
-        onPress={handleCloseModal}>
+      <Pressable style={styles.backdrop} onPress={handleCloseModal}>
         <Pressable style={styles.card} onPress={() => {}}>
           {/* Header */}
           <View style={styles.headerRow}>
-            <View style={styles.iconCircle}>
-              <Ionicons name="rocket-outline" size={24} color="#38bdf8" />
+            <View
+              style={[
+                styles.iconCircle,
+                isDowngrade && styles.iconCircleStable,
+              ]}>
+              <Ionicons
+                name={isDowngrade ? 'shield-checkmark-outline' : 'rocket-outline'}
+                size={24}
+                color={isDowngrade ? '#34d399' : '#38bdf8'}
+              />
             </View>
             <View style={styles.headerTextCol}>
-              <Text style={styles.title}>
-                {isPreview
-                  ? 'Podgląd aktualizacji'
-                  : isBetaRelease
-                    ? 'Dostępna aktualizacja Beta'
-                    : 'Dostępna aktualizacja'}
+              <Text style={styles.title} numberOfLines={2}>
+                {modalTitle}
               </Text>
-              {showSubtitle ? (
-                <Text style={styles.subtitle} numberOfLines={2}>
-                  {updateInfo.releaseTitle}
-                </Text>
-              ) : null}
+              <View style={styles.subtitleRow}>
+                {showSubtitle ? (
+                  <Text style={styles.subtitle} numberOfLines={1}>
+                    {updateInfo.releaseTitle}
+                  </Text>
+                ) : (
+                  <Text style={styles.subtitle} numberOfLines={1}>
+                    Ligmus {latestTag}
+                  </Text>
+                )}
+                <View
+                  style={[
+                    styles.channelBadge,
+                    isBetaRelease ? styles.betaBadge : styles.stableBadge,
+                  ]}>
+                  <Text
+                    style={[
+                      styles.channelBadgeText,
+                      isBetaRelease ? styles.betaBadgeText : styles.stableBadgeText,
+                    ]}>
+                    {isBetaRelease ? 'BETA' : 'STABILNA'}
+                  </Text>
+                </View>
+              </View>
             </View>
           </View>
 
-          {/* Version & Size Pill Row */}
+          {/* Single-Line Version Transition & Package Size Bar */}
           <View style={styles.versionBar}>
             <View style={styles.versionPills}>
               <View style={styles.currentVerBadge}>
-                <Text style={styles.currentVerText}>{currentTag}</Text>
+                <Text style={styles.currentVerText} numberOfLines={1}>
+                  {currentTag}
+                </Text>
               </View>
-              <Ionicons name="arrow-forward" size={15} color="#64748b" />
+              <Ionicons name="arrow-forward" size={14} color="#64748b" />
               <View style={styles.newVerBadge}>
-                <Text style={styles.newVerText}>{latestTag}</Text>
+                <Text style={styles.newVerText} numberOfLines={1}>
+                  {latestTag}
+                </Text>
               </View>
-              {isBetaRelease && (
-                <View style={styles.betaBadge}>
-                  <Text style={styles.betaBadgeText}>BETA</Text>
-                </View>
-              )}
             </View>
             {packageSizeLabel ? (
               <View style={styles.sizeBadge}>
                 <Ionicons name="document-outline" size={13} color="#94a3b8" />
-                <Text style={styles.sizeText}>{packageSizeLabel}</Text>
+                <Text style={styles.sizeText} numberOfLines={1}>
+                  {packageSizeLabel}
+                </Text>
               </View>
             ) : null}
           </View>
 
-          {/* Release Notes */}
+          {/* Release Notes (Scrollable & Clickable to open GitHub Release) */}
           <View style={styles.notesSection}>
-            <Text style={styles.notesHeader}>Co nowego:</Text>
+            <View style={styles.notesHeaderRow}>
+              <Text style={styles.notesHeader} numberOfLines={1}>
+                {isDowngrade ? 'Opis wydania stabilnego:' : 'Co nowego:'}
+              </Text>
+              <TouchableOpacity
+                activeOpacity={0.75}
+                onPress={handleOpenReleasePage}
+                style={styles.githubLinkChip}>
+                <Text style={styles.githubLinkChipText}>GitHub Releases</Text>
+                <Ionicons name="open-outline" size={12} color="#38bdf8" />
+              </TouchableOpacity>
+            </View>
+
             <ScrollView
               style={styles.notesScroll}
               contentContainerStyle={styles.notesScrollContent}
+              nestedScrollEnabled
               showsVerticalScrollIndicator>
-              <Text style={styles.notesBody}>
-                {updateInfo.releaseNotes ||
-                  'Poprawki błędów, optymalizacja działania oraz ulepszenia stabilności.'}
-              </Text>
+              <Pressable
+                onPress={handleOpenReleasePage}
+                style={({ pressed }) => [
+                  styles.notesPressable,
+                  pressed && { opacity: 0.82 },
+                ]}>
+                <Text style={styles.notesBody}>
+                  {updateInfo.releaseNotes ||
+                    '• Poprawki błędów, optymalizacja działania oraz ulepszenia stabilności.'}
+                </Text>
+              </Pressable>
             </ScrollView>
           </View>
 
@@ -254,14 +327,20 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
             <View style={styles.iosHintBox}>
               <Ionicons name="information-circle-outline" size={17} color="#38bdf8" />
               <Text style={styles.iosHintText}>
-                Pobierz plik IPA w Safari, a następnie zainstaluj aktualizację przez SideStore lub AltStore.
+                Pobierz plik IPA w Safari, a następnie zainstaluj pakiet przez SideStore lub AltStore.
               </Text>
             </View>
           )}
 
-          {/* Download Progress (Android) */}
+          {/* Download Progress (Android) — Non-Overflowing Stacked Layout */}
           {isDownloading && (
             <View style={styles.progressBox}>
+              <View style={styles.progressTopRow}>
+                <Text style={styles.progressStatusText} numberOfLines={1}>
+                  Pobieranie pakietu APK...
+                </Text>
+                <Text style={styles.progressPercentText}>{percent}%</Text>
+              </View>
               <View style={styles.progressTrack}>
                 <View
                   style={[
@@ -270,13 +349,11 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                   ]}
                 />
               </View>
-              <View style={styles.progressMetaRow}>
-                <Text style={styles.progressStatusText}>Pobieranie pakietu APK...</Text>
-                <Text style={styles.progressPercentText}>
-                  {writtenMB && totalMB ? `${writtenMB} / ${totalMB} • ` : ''}
-                  {percent}%
+              {writtenMB && totalMB ? (
+                <Text style={styles.progressBytesText} numberOfLines={1}>
+                  Pobrano {writtenMB} z {totalMB}
                 </Text>
-              </View>
+              ) : null}
             </View>
           )}
 
@@ -286,8 +363,8 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
               <Ionicons name="checkmark-circle" size={18} color="#10b981" />
               <Text style={styles.previewSuccessText}>
                 {isIOS
-                  ? 'Tryb podglądu — po wydaniu nowej wersji na GitHub Releases przycisk otworzy pobieranie pliku IPA bezpośrednio w Safari.'
-                  : 'Tryb podglądu — po opublikowaniu nowego wydania z plikiem APK na GitHub Releases w tym miejscu automatycznie uruchomi się instalator Androida.'}
+                  ? 'Tryb podglądu — przycisk otworzy pobieranie pliku IPA bezpośrednio w Safari.'
+                  : 'Tryb podglądu — po pobraniu pliku APK z GitHub Releases automatycznie uruchomi się instalator Androida.'}
               </Text>
             </View>
           )}
@@ -302,20 +379,30 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
               <TouchableOpacity
                 style={styles.browserFallbackBtn}
                 onPress={handleOpenBrowserFallback}>
-                <Ionicons name="open-outline" size={15} color="#38bdf8" />
-                <Text style={styles.browserFallbackText}>Pobierz w przeglądarce</Text>
+                <Ionicons name="download-outline" size={15} color="#38bdf8" />
+                <Text style={styles.browserFallbackText}>
+                  Pobierz APK w przeglądarce
+                </Text>
               </TouchableOpacity>
             </View>
           )}
 
           {/* Footer Actions */}
           <View style={styles.footerRow}>
-            <TouchableOpacity
-              style={[styles.laterBtn, isDownloading && styles.btnDisabled]}
-              disabled={isDownloading}
-              onPress={handleCloseModal}>
-              <Text style={styles.laterBtnText}>Później</Text>
-            </TouchableOpacity>
+            {triggerSource === 'auto' && (
+              <TouchableOpacity
+                style={[styles.laterBtn, isDownloading && styles.btnDisabled]}
+                disabled={isDownloading}
+                onPress={handleDisableAuto}>
+                <Text
+                  style={styles.laterBtnText}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.82}>
+                  Wyłącz auto-aktualizacje
+                </Text>
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity
               style={[styles.installBtn, isDownloading && styles.btnDisabled]}
@@ -324,7 +411,9 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
               {isDownloading ? (
                 <>
                   <ActivityIndicator size="small" color="#ffffff" />
-                  <Text style={styles.installBtnText}>Pobieranie...</Text>
+                  <Text style={styles.installBtnText} numberOfLines={1}>
+                    Pobieranie...
+                  </Text>
                 </>
               ) : (
                 <>
@@ -333,7 +422,13 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
                     size={18}
                     color="#ffffff"
                   />
-                  <Text style={styles.installBtnText}>{primaryButtonLabel}</Text>
+                  <Text
+                    style={styles.installBtnText}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.85}>
+                    {primaryButtonLabel}
+                  </Text>
                 </>
               )}
             </TouchableOpacity>
@@ -350,17 +445,17 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(2, 6, 23, 0.78)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    padding: 16,
   },
   card: {
     width: '100%',
     maxWidth: 440,
     backgroundColor: '#1e293b',
     borderRadius: 22,
-    padding: 20,
+    padding: 18,
     borderWidth: 1,
     borderColor: '#334155',
-    gap: 16,
+    gap: 14,
   },
   headerRow: {
     flexDirection: 'row',
@@ -377,18 +472,54 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  iconCircleStable: {
+    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+  },
   headerTextCol: {
     flex: 1,
-    gap: 2,
+    gap: 3,
   },
   title: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
     color: '#f8fafc',
+  },
+  subtitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
   },
   subtitle: {
     fontSize: 13,
     color: '#94a3b8',
+    flexShrink: 1,
+  },
+  channelBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  betaBadge: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+  },
+  stableBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.16)',
+    borderColor: 'rgba(16, 185, 129, 0.45)',
+  },
+  channelBadgeText: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  betaBadgeText: {
+    color: '#fbbf24',
+  },
+  stableBadgeText: {
+    color: '#34d399',
   },
   versionBar: {
     flexDirection: 'row',
@@ -396,8 +527,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     backgroundColor: '#0f172a',
     borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
     borderWidth: 1,
     borderColor: '#1e293b',
     gap: 8,
@@ -405,83 +536,102 @@ const styles = StyleSheet.create({
   versionPills: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexWrap: 'wrap',
+    flexWrap: 'nowrap',
     flex: 1,
+    minWidth: 0,
     gap: 6,
   },
   currentVerBadge: {
     backgroundColor: '#1e293b',
-    paddingHorizontal: 9,
+    paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#334155',
+    flexShrink: 1,
   },
   currentVerText: {
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: '600',
     color: '#94a3b8',
   },
   newVerBadge: {
     backgroundColor: 'rgba(16, 185, 129, 0.16)',
-    paddingHorizontal: 9,
+    paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.4)',
+    flexShrink: 1,
   },
   newVerText: {
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: '700',
     color: '#34d399',
-  },
-  betaBadge: {
-    backgroundColor: 'rgba(245, 158, 11, 0.16)',
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.45)',
-  },
-  betaBadgeText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#fbbf24',
-    letterSpacing: 0.4,
   },
   sizeBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    flexShrink: 0,
   },
   sizeText: {
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: '600',
     color: '#94a3b8',
   },
   notesSection: {
     gap: 8,
   },
+  notesHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
   notesHeader: {
-    fontSize: 12,
+    flex: 1,
+    flexShrink: 1,
+    fontSize: 11.5,
     fontWeight: '700',
     color: '#94a3b8',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
+  githubLinkChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.3)',
+  },
+  githubLinkChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#38bdf8',
+  },
   notesScroll: {
-    maxHeight: 190,
+    minHeight: 150,
+    maxHeight: 270,
     backgroundColor: '#0f172a',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1e293b',
+    borderColor: '#263449',
   },
   notesScrollContent: {
-    padding: 12,
+    padding: 13,
+  },
+  notesPressable: {
+    gap: 12,
   },
   notesBody: {
     fontSize: 13.5,
-    lineHeight: 20,
+    lineHeight: 21,
     color: '#e2e8f0',
   },
   iosHintBox: {
@@ -502,12 +652,34 @@ const styles = StyleSheet.create({
     color: '#cbd5e1',
   },
   progressBox: {
-    gap: 8,
+    gap: 7,
     backgroundColor: '#0f172a',
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  progressTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  progressStatusText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#cbd5e1',
+    fontWeight: '600',
+  },
+  progressPercentText: {
+    fontSize: 12.5,
+    color: '#38bdf8',
+    fontWeight: '800',
+    flexShrink: 0,
   },
   progressTrack: {
+    width: '100%',
     height: 8,
     borderRadius: 4,
     backgroundColor: '#1e293b',
@@ -518,20 +690,10 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: '#3b82f6',
   },
-  progressMetaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  progressStatusText: {
-    fontSize: 12,
+  progressBytesText: {
+    fontSize: 11.5,
     color: '#94a3b8',
     fontWeight: '500',
-  },
-  progressPercentText: {
-    fontSize: 12,
-    color: '#38bdf8',
-    fontWeight: '700',
   },
   previewSuccessBox: {
     flexDirection: 'row',
@@ -587,12 +749,13 @@ const styles = StyleSheet.create({
   footerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
     marginTop: 2,
   },
   laterBtn: {
+    flex: 1,
     paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 10,
     borderRadius: 12,
     backgroundColor: '#0f172a',
     borderWidth: 1,
@@ -601,25 +764,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   laterBtnText: {
-    fontSize: 14,
+    fontSize: 12.5,
     fontWeight: '600',
     color: '#cbd5e1',
+    textAlign: 'center',
   },
   installBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: 6,
     paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     borderRadius: 12,
     backgroundColor: '#3b82f6',
   },
   installBtnText: {
-    fontSize: 14,
+    fontSize: 13.5,
     fontWeight: '700',
     color: '#ffffff',
+    flexShrink: 1,
   },
   btnDisabled: {
     opacity: 0.6,

@@ -129,7 +129,8 @@ const LessonCardContent: React.FC<LessonCardContentProps> = React.memo(
     onHideRule,
   }) => {
     const isStandalone = Boolean(lesson.isStandaloneEvent);
-    const isCancelled = !isStandalone && Boolean(lesson.isCancelled);
+    const isFreeDay = !isStandalone && Boolean(lesson.isFreeDay);
+    const isCancelled = !isStandalone && Boolean(lesson.isCancelled || isFreeDay);
     const isSubstitution =
       !isStandalone && !isCancelled && Boolean(lesson.isSubstitution);
     const attConfig = lesson.attendance
@@ -149,13 +150,15 @@ const LessonCardContent: React.FC<LessonCardContentProps> = React.memo(
       ? lesson.teacher.replace(/\s+/g, ' ').trim()
       : '';
 
-    const changeBannerTitle = isCancelled
-      ? 'Lekcja odwołana'
-      : lesson.changeType === 'room'
-        ? 'Zmiana sali'
-        : lesson.changeType === 'moved'
-          ? 'Przesunięcie lekcji'
-          : 'Zastępstwo';
+    const changeBannerTitle = isFreeDay
+      ? 'Dzień wolny szkoły'
+      : isCancelled
+        ? 'Lekcja odwołana'
+        : lesson.changeType === 'room'
+          ? 'Zmiana sali'
+          : lesson.changeType === 'moved'
+            ? 'Przesunięcie lekcji'
+            : 'Zastępstwo';
 
     return (
       <View
