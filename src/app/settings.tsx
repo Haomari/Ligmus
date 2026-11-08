@@ -2,19 +2,23 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Directory } from 'expo-file-system';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { getEffectiveBottomInset, WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
 import { useLibrus } from '@/context/LibrusContext';
+import { librusClient } from '@/services/librusClient';
 import {
   DEFAULT_SYNC_SETTINGS,
   getSyncSettings,
@@ -26,11 +30,17 @@ import {
 import {
   DEFAULT_EXCUSE_PRESETS,
   formatDownloadFolderLabel,
+  getAutoUpdateEnabled,
   getCurrentSchoolYearId,
   getDownloadFolderUri,
   getExcusePresetsStore,
+  getUpdateChannel,
+  onAutoUpdateSettingChange,
+  saveAutoUpdateEnabled,
   saveDownloadFolderUri,
   saveExcusePresetsStore,
+  saveUpdateChannel,
+  UpdateChannel,
 } from '@/services/fileCache';
 import { ExcusePreset, ExcusePresetsStore } from '@/types/librus';
 import { formatShortStudentSignature } from '@/components/message-compose-modal';
@@ -49,7 +59,21 @@ const MAX_EXCUSE_PRESETS = 8;
 export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { student, clearLocalCacheAndRefresh, logout } = useLibrus();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const effectiveBottomInset = getEffectiveBottomInset(insets.bottom, isWideScreen);
+  const {
+    student,
+    hiddenTerminarzStore,
+    restoreHiddenTerminarzEvent,
+    restoreHiddenTerminarzRule,
+    clearAllHiddenTerminarz,
+    clearLocalCacheAndRefresh,
+    authInvalidState,
+    savedLogin,
+    openCredentialsModal,
+    logout,
+  } = useLibrus();
 
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(DEFAULT_SYNC_SETTINGS);
   const [excuseStore, setExcuseStore] = useState<ExcusePresetsStore>(() =>
@@ -64,6 +88,12 @@ export default function SettingsScreen() {
   const [downloadFolderUri, setDownloadFolderUri] = useState<string | null>(() =>
     getDownloadFolderUri()
   );
+  const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(() =>
+    getUpdateChannel(APP_VERSION)
+  );
+  const [autoUpdateEnabled, setAutoUpdateEnabled] = useState<boolean>(() =>
+    getAutoUpdateEnabled()
+  );
   const [clearingCache, setClearingCache] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -71,6 +101,9 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     getSyncSettings().then(setSyncSettings);
+    return onAutoUpdateSettingChange((next) => {
+      setAutoUpdateEnabled(next);
+    });
   }, []);
 
   useFocusEffect(
@@ -80,6 +113,8 @@ export default function SettingsScreen() {
         if (!active) return;
         setExcuseStore(getExcusePresetsStore());
         setDownloadFolderUri(getDownloadFolderUri());
+        setUpdateChannel(getUpdateChannel(APP_VERSION));
+        setAutoUpdateEnabled(getAutoUpdateEnabled());
       });
       return () => {
         active = false;
@@ -202,10 +237,45 @@ export default function SettingsScreen() {
     );
   };
 
+  const handleChangeUpdateChannel = async (channel: UpdateChannel) => {
+    const isRunningBeta = APP_VERSION.includes('-');
+    if (channel === updateChannel && !(channel === 'stable' && isRunningBeta)) {
+      return;
+    }
+    setUpdateChannel(channel);
+    saveUpdateChannel(channel);
+    setCheckingUpdate(true);
+    try {
+      if (channel === 'beta') {
+        setToastMessage('Kanał aktualizacji: Beta (nowe funkcje testowe)');
+        const res = await checkForAppUpdate({ channelOverride: 'beta' });
+        if (res.updateAvailable) {
+          setUpdateModalInfo(res);
+        }
+      } else {
+        setToastMessage('Kanał aktualizacji: Stabilny');
+        const res = await checkForAppUpdate({
+          channelOverride: 'stable',
+          allowDowngradeToStable: true,
+        });
+        if (res.updateAvailable) {
+          setUpdateModalInfo(res);
+        }
+      }
+    } catch {
+      // Ignore network errors when switching channel
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
   const handleCheckForUpdates = async () => {
     setCheckingUpdate(true);
     try {
-      const res = await checkForAppUpdate();
+      const res = await checkForAppUpdate({
+        channelOverride: updateChannel,
+        allowDowngradeToStable: updateChannel === 'stable',
+      });
       if (res.updateAvailable) {
         setUpdateModalInfo(res);
       } else {
@@ -225,7 +295,7 @@ export default function SettingsScreen() {
 
   const handlePreviewUpdateModal = () => {
     if (__DEV__) {
-      setUpdateModalInfo(getMockPreviewUpdate());
+      setUpdateModalInfo(getMockPreviewUpdate(updateChannel));
     }
   };
 
@@ -330,7 +400,7 @@ export default function SettingsScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.container,
-          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          { paddingBottom: Math.max(effectiveBottomInset + 28, 44) },
         ]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}>
@@ -351,12 +421,60 @@ export default function SettingsScreen() {
                   <Text style={styles.schoolYearBadgeText}>{schoolYearId}</Text>
                 </View>
               </View>
-              <Text style={styles.studentClass}>
+              <Text style={styles.studentClass} numberOfLines={1}>
                 {student?.classGroup || 'Konto Librus'}
-                {student?.educator ? ` • Wych. ${student.educator}` : ''}
               </Text>
+              {student?.educator ? (
+                <Text style={styles.studentEducator} numberOfLines={1}>
+                  Wych. {student.educator}
+                </Text>
+              ) : null}
             </View>
           </View>
+
+          <View style={styles.divider} />
+
+          <TouchableOpacity
+            style={styles.actionRow}
+            activeOpacity={0.8}
+            onPress={openCredentialsModal}
+            onLongPress={
+              __DEV__
+                ? () => {
+                    void librusClient.simulateAuthInvalidForDev();
+                  }
+                : undefined
+            }
+            delayLongPress={500}>
+            <Ionicons
+              name="key-outline"
+              size={20}
+              color={authInvalidState ? '#f59e0b' : '#38bdf8'}
+            />
+            <View style={{ flex: 1 }}>
+              <Text
+                style={[
+                  styles.actionTitle,
+                  authInvalidState && { color: '#fcd34d' },
+                ]}>
+                {authInvalidState
+                  ? 'Wymagana aktualizacja hasła'
+                  : 'Zmień zapisane hasło Librus'}
+              </Text>
+              <Text style={styles.actionSubText} numberOfLines={1}>
+                {authInvalidState
+                  ? 'Zapisane hasło przestało działać — dotknij, aby wpisać nowe'
+                  : savedLogin
+                    ? `Konto: ${savedLogin} · bez utraty danych lokalnych`
+                    : 'Zaktualizuj hasło po jego zmianie w Librusie'}
+              </Text>
+            </View>
+            <Ionicons
+              name="chevron-forward"
+              size={18}
+              color={authInvalidState ? '#f59e0b' : '#64748b'}
+            />
+          </TouchableOpacity>
         </View>
 
         {/* Excuse Presets Section */}
@@ -533,7 +651,9 @@ export default function SettingsScreen() {
             <View style={styles.expoGoBanner}>
               <Ionicons name="information-circle-outline" size={17} color="#38bdf8" />
               <Text style={styles.expoGoBannerDesc}>
-                Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji APK.
+                {Platform.OS === 'ios'
+                  ? 'Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji IPA.'
+                  : 'Tryb Expo Go — powiadomienia w tle aktywują się po zainstalowaniu aplikacji APK.'}
               </Text>
             </View>
           )}
@@ -609,38 +729,145 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* Hidden Terminarz Events & Rules */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionHeader}>Ukryte wydarzenia z terminarza</Text>
+            {hiddenTerminarzStore.rules.length +
+              hiddenTerminarzStore.hiddenEventsMeta.length >
+              1 && (
+              <TouchableOpacity
+                activeOpacity={0.75}
+                onPress={() => {
+                  clearAllHiddenTerminarz();
+                  setToastMessage('Przywrócono wszystkie ukryte wydarzenia');
+                }}>
+                <Text style={styles.restoreAllLinkText}>Przywróć wszystkie</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.card}>
+            {hiddenTerminarzStore.rules.length === 0 &&
+            hiddenTerminarzStore.hiddenEventIds.length === 0 ? (
+              <View style={styles.actionRow}>
+                <Ionicons name="eye-outline" size={20} color="#64748b" />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actionTitle}>Brak ukrytych wydarzeń</Text>
+                  <Text style={styles.actionSubText}>
+                    Otwórz wydarzenie w planie lekcji (lub przytrzymaj kafelek) i wybierz „Ukryj”.
+                  </Text>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.hiddenItemsList}>
+                {hiddenTerminarzStore.rules.map((rule, idx) => (
+                  <React.Fragment key={rule.id}>
+                    {idx > 0 && <View style={styles.divider} />}
+                    <View style={styles.actionRow}>
+                      <Ionicons name="eye-off-outline" size={19} color="#38bdf8" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.actionTitle} numberOfLines={1}>
+                          {rule.displayType}
+                          {rule.subjectLabel ? ` · ${rule.subjectLabel}` : ''}
+                        </Text>
+                        <Text style={styles.actionSubText} numberOfLines={1}>
+                          Zawsze ukryte
+                          {rule.teacher ? ` · ${rule.teacher}` : ''}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          restoreHiddenTerminarzRule(rule.id);
+                          setToastMessage('Przywrócono wydarzenia do planu');
+                        }}
+                        style={styles.inlineResetPill}>
+                        <Text style={styles.inlineResetPillText}>Przywróć</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </React.Fragment>
+                ))}
+
+                {hiddenTerminarzStore.hiddenEventIds.map((eventId, idx) => {
+                  const meta = hiddenTerminarzStore.hiddenEventsMeta.find(
+                    (m) => m.id === eventId
+                  );
+                  const showDivider =
+                    idx > 0 || hiddenTerminarzStore.rules.length > 0;
+                  return (
+                    <React.Fragment key={eventId}>
+                      {showDivider && <View style={styles.divider} />}
+                      <View style={styles.actionRow}>
+                        <Ionicons
+                          name="calendar-outline"
+                          size={19}
+                          color="#94a3b8"
+                        />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.actionTitle} numberOfLines={1}>
+                            {meta?.displayType || 'Ukryte wydarzenie'}
+                            {meta?.subject ? ` · ${meta.subject}` : ''}
+                          </Text>
+                          <Text style={styles.actionSubText} numberOfLines={1}>
+                            Tylko termin {meta?.date || eventId}
+                            {meta?.teacher ? ` · ${meta.teacher}` : ''}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          activeOpacity={0.8}
+                          onPress={() => {
+                            restoreHiddenTerminarzEvent(eventId);
+                            setToastMessage('Przywrócono wydarzenie');
+                          }}
+                          style={styles.inlineResetPill}>
+                          <Text style={styles.inlineResetPillText}>Przywróć</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </React.Fragment>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        </View>
+
         {/* Data & Files (Merged Download Folder + Cache) */}
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Dane i pliki</Text>
 
           <View style={styles.card}>
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={styles.folderMainTap}
-                activeOpacity={0.8}
-                onPress={handleChooseDownloadFolder}>
-                <Ionicons name="folder-open-outline" size={20} color="#38bdf8" />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.actionTitle}>Folder zapisu załączników</Text>
-                  <Text style={styles.actionSubText} numberOfLines={1}>
-                    {formatDownloadFolderLabel(downloadFolderUri)}
-                  </Text>
+            {Platform.OS === 'android' && (
+              <>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={styles.folderMainTap}
+                    activeOpacity={0.8}
+                    onPress={handleChooseDownloadFolder}>
+                    <Ionicons name="folder-open-outline" size={20} color="#38bdf8" />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.actionTitle}>Folder zapisu załączników</Text>
+                      <Text style={styles.actionSubText} numberOfLines={1}>
+                        {formatDownloadFolderLabel(downloadFolderUri)}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  {downloadFolderUri ? (
+                    <TouchableOpacity
+                      onPress={handleResetDownloadFolder}
+                      style={styles.inlineResetPill}>
+                      <Text style={styles.inlineResetPillText}>Resetuj</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity onPress={handleChooseDownloadFolder} hitSlop={8}>
+                      <Ionicons name="chevron-forward" size={18} color="#64748b" />
+                    </TouchableOpacity>
+                  )}
                 </View>
-              </TouchableOpacity>
-              {downloadFolderUri ? (
-                <TouchableOpacity
-                  onPress={handleResetDownloadFolder}
-                  style={styles.inlineResetPill}>
-                  <Text style={styles.inlineResetPillText}>Resetuj</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity onPress={handleChooseDownloadFolder} hitSlop={8}>
-                  <Ionicons name="chevron-forward" size={18} color="#64748b" />
-                </TouchableOpacity>
-              )}
-            </View>
 
-            <View style={styles.divider} />
+                <View style={styles.divider} />
+              </>
+            )}
 
             <TouchableOpacity
               style={styles.actionRow}
@@ -673,7 +900,83 @@ export default function SettingsScreen() {
           <View style={styles.card}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Wersja</Text>
-              <Text style={styles.infoValue}>{formatVersionTag(APP_VERSION)}</Text>
+              <View style={styles.versionValueRow}>
+                <Text style={styles.infoValue}>{formatVersionTag(APP_VERSION)}</Text>
+                {APP_VERSION.includes('-') && (
+                  <View style={styles.versionBetaBadge}>
+                    <Text style={styles.versionBetaBadgeText}>BETA</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.settingBlock}>
+              <Text style={styles.settingLabel}>Kanał aktualizacji</Text>
+              <View style={styles.intervalOptionsRow}>
+                {(
+                  [
+                    { label: 'Stabilny', val: 'stable' as UpdateChannel },
+                    { label: 'Beta', val: 'beta' as UpdateChannel },
+                  ]
+                ).map((opt) => {
+                  const isActive = updateChannel === opt.val;
+                  return (
+                    <TouchableOpacity
+                      key={opt.val}
+                      style={[
+                        styles.intervalChip,
+                        isActive &&
+                          (opt.val === 'beta'
+                            ? styles.betaChannelChipActive
+                            : styles.intervalChipActive),
+                      ]}
+                      onPress={() => handleChangeUpdateChannel(opt.val)}>
+                      <Text
+                        style={[
+                          styles.intervalChipText,
+                          isActive &&
+                            (opt.val === 'beta'
+                              ? styles.betaChannelChipTextActive
+                              : styles.intervalChipTextActive),
+                        ]}>
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={styles.channelDescText}>
+                {updateChannel === 'beta'
+                  ? 'Wcześniejszy dostęp do nowych funkcji testowych (beta-updates) oraz wydań stabilnych.'
+                  : 'Tylko sprawdzone wydania główne z gałęzi stabilnej (master).'}
+              </Text>
+            </View>
+
+            <View style={styles.divider} />
+
+            <View style={styles.switchRow}>
+              <View style={styles.switchTextCol}>
+                <Text style={styles.switchTitle}>Automatyczne aktualizacje</Text>
+                <Text style={styles.switchDesc}>
+                  Sprawdzaj dostępność nowych wersji automatycznie przy starcie aplikacji
+                </Text>
+              </View>
+              <Switch
+                value={autoUpdateEnabled}
+                onValueChange={(val) => {
+                  setAutoUpdateEnabled(val);
+                  saveAutoUpdateEnabled(val);
+                  setToastMessage(
+                    val
+                      ? 'Włączono automatyczne sprawdzanie aktualizacji'
+                      : 'Wyłączono automatyczne sprawdzanie aktualizacji'
+                  );
+                }}
+                thumbColor={autoUpdateEnabled ? '#38bdf8' : '#94a3b8'}
+                trackColor={{ false: '#334155', true: '#38bdf840' }}
+              />
             </View>
 
             <View style={styles.divider} />
@@ -705,6 +1008,11 @@ export default function SettingsScreen() {
       <UpdateModal
         visible={Boolean(updateModalInfo)}
         updateInfo={updateModalInfo}
+        triggerSource="manual"
+        onDisableAutoUpdate={() => {
+          setAutoUpdateEnabled(false);
+          saveAutoUpdateEnabled(false);
+        }}
         onClose={() => setUpdateModalInfo(null)}
       />
       <ToastBanner message={toastMessage} onHide={() => setToastMessage(null)} />
@@ -789,6 +1097,12 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     color: '#38bdf8',
     marginTop: 3,
+    fontWeight: '600',
+  },
+  studentEducator: {
+    fontSize: 12.5,
+    color: '#38bdf8',
+    marginTop: 2,
     fontWeight: '600',
   },
   section: {
@@ -982,8 +1296,41 @@ const styles = StyleSheet.create({
   },
   infoRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 3,
+  },
+  versionValueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  versionBetaBadge: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  versionBetaBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#fbbf24',
+    letterSpacing: 0.4,
+  },
+  betaChannelChipActive: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderColor: '#f59e0b',
+  },
+  betaChannelChipTextActive: {
+    color: '#fbbf24',
+    fontWeight: '700',
+  },
+  channelDescText: {
+    fontSize: 11.5,
+    color: '#94a3b8',
+    lineHeight: 16,
   },
   infoLabel: {
     fontSize: 13.5,
@@ -1082,5 +1429,19 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: '#cbd5e1',
     lineHeight: 15,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  restoreAllLinkText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#38bdf8',
+  },
+  hiddenItemsList: {
+    gap: 2,
   },
 });

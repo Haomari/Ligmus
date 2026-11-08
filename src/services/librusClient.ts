@@ -10,8 +10,10 @@ import {
   LibrusMessageSummary,
   MessageFolder,
   MessageRecipient,
+  SchoolAnnouncement,
   StudentInfo,
   SubjectGrades,
+  TerminarzEvent,
   TimetableLesson,
   WeekSchedule,
 } from '@/types/librus';
@@ -25,22 +27,33 @@ import {
 } from '@/utils/dates';
 import { decodeHtmlEntities } from '@/utils/html';
 import {
+  applyInboxReadState,
   clearAllFileCaches,
   ensureSchoolYearCacheValid,
+  formatYearMonthKey,
   getAllCachedWeeks,
+  getCachedAnnouncements,
   getCachedAttendanceMarks,
   getCachedAttendanceStats,
   getCachedMessageDetail,
   getCachedMessages,
   getCachedRealizations,
+  getCachedTerminarzMonth,
   getCachedWeek,
+  markInboxMessageIdsRead,
+  saveCachedAnnouncements,
   saveCachedAttendanceMarks,
   saveCachedAttendanceStats,
   saveCachedMessageDetail,
   saveCachedMessages,
   saveCachedRealizations,
+  saveCachedTerminarzMonth,
   saveCachedWeek,
 } from '@/services/fileCache';
+import {
+  classifyTerminarzType,
+  cleanFreeDayReason,
+} from '@/utils/terminarzMatcher';
 import {
   ScrapedAttendanceSummary,
   classifyAttendanceSymbol,
@@ -53,7 +66,15 @@ const STORAGE_KEYS = {
   COOKIES: 'ligmus_saved_cookies',
   STUDENT_INFO: 'ligmus_student_info',
   GRADES_CACHE: 'ligmus_grades_cache',
+  AUTH_INVALID: 'ligmus_auth_invalid_state',
 };
+
+export interface AuthInvalidState {
+  login: string;
+  message: string;
+  detectedAt: number;
+  notifiedInBackground?: boolean;
+}
 
 /**
  * Removes duplicate parenthesized names returned by Librus Synergia, e.g.
@@ -140,10 +161,77 @@ class LibrusClient {
   private currentStudent: StudentInfo | null = null;
   private cachedGrades: SubjectGrades[] = [];
   private authenticated: boolean = false;
+  private savedLogin: string | null = null;
+  private authInvalidState: AuthInvalidState | null = null;
+  private authInvalidListeners = new Set<(state: AuthInvalidState | null) => void>();
   private reloginPromise: Promise<boolean> | null = null;
 
   constructor() {
     this.checkSavedSession();
+  }
+
+  private notifyAuthInvalidListeners() {
+    const snapshot = this.authInvalidState;
+    for (const listener of this.authInvalidListeners) {
+      try {
+        listener(snapshot);
+      } catch {}
+    }
+  }
+
+  onAuthInvalidChange(listener: (state: AuthInvalidState | null) => void): () => void {
+    this.authInvalidListeners.add(listener);
+    return () => {
+      this.authInvalidListeners.delete(listener);
+    };
+  }
+
+  getAuthInvalidState(): AuthInvalidState | null {
+    return this.authInvalidState;
+  }
+
+  getSavedLoginSync(): string | null {
+    return this.savedLogin;
+  }
+
+  async getSavedLogin(): Promise<string | null> {
+    if (this.savedLogin) return this.savedLogin;
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) return null;
+    try {
+      const parsed = JSON.parse(credsRaw);
+      if (parsed?.login && typeof parsed.login === 'string') {
+        this.savedLogin = parsed.login;
+        return parsed.login;
+      }
+    } catch {}
+    return null;
+  }
+
+  async markAuthInvalidBackgroundNotified(): Promise<void> {
+    if (!this.authInvalidState || this.authInvalidState.notifiedInBackground) {
+      return;
+    }
+    const updated: AuthInvalidState = {
+      ...this.authInvalidState,
+      notifiedInBackground: true,
+    };
+    this.authInvalidState = updated;
+    await this.saveStoredData(STORAGE_KEYS.AUTH_INVALID, JSON.stringify(updated));
+    this.notifyAuthInvalidListeners();
+  }
+
+  async simulateAuthInvalidForDev(): Promise<void> {
+    const login = (await this.getSavedLogin()) || 'konto_librus';
+    const simulated: AuthInvalidState = {
+      login,
+      message: 'Nieprawidłowy login i/lub hasło. (Podgląd testowy)',
+      detectedAt: Date.now(),
+      notifiedInBackground: false,
+    };
+    this.authInvalidState = simulated;
+    await this.saveStoredData(STORAGE_KEYS.AUTH_INVALID, JSON.stringify(simulated));
+    this.notifyAuthInvalidListeners();
   }
 
   private async getStoredData(key: string): Promise<string | null> {
@@ -171,10 +259,40 @@ class LibrusClient {
       const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
       if (!credsRaw) {
         this.authenticated = false;
+        this.savedLogin = null;
+        if (this.authInvalidState !== null) {
+          this.authInvalidState = null;
+          this.notifyAuthInvalidListeners();
+        }
         return false;
       }
 
+      try {
+        const parsedCreds = JSON.parse(credsRaw);
+        if (parsedCreds?.login && typeof parsedCreds.login === 'string') {
+          this.savedLogin = parsedCreds.login;
+        }
+      } catch {}
+
       this.authenticated = true;
+
+      // Restore persisted invalid-credentials flag if background sync or prior session detected password change
+      const savedInvalidRaw = await this.getStoredData(STORAGE_KEYS.AUTH_INVALID);
+      if (savedInvalidRaw) {
+        try {
+          const parsedInvalid: AuthInvalidState = JSON.parse(savedInvalidRaw);
+          if (parsedInvalid && parsedInvalid.login) {
+            const changed =
+              !this.authInvalidState ||
+              this.authInvalidState.detectedAt !== parsedInvalid.detectedAt ||
+              this.authInvalidState.login !== parsedInvalid.login;
+            this.authInvalidState = parsedInvalid;
+            if (changed) {
+              this.notifyAuthInvalidListeners();
+            }
+          }
+        } catch {}
+      }
 
       // Auto-reset school year cache on Sept 1 rollover
       const rolledOver = ensureSchoolYearCacheValid();
@@ -266,6 +384,10 @@ class LibrusClient {
    * Uses a single-flight mutex so parallel requests share one OAuth login flow.
    */
   private async reloginWithStoredCredentials(): Promise<boolean> {
+    if (this.authInvalidState) {
+      return false;
+    }
+
     if (this.reloginPromise) {
       return this.reloginPromise;
     }
@@ -276,9 +398,28 @@ class LibrusClient {
         if (!credsRaw) return false;
         const { login, pass } = JSON.parse(credsRaw);
         if (!login || !pass) return false;
+        this.savedLogin = login;
 
         console.log('[LibrusClient] Session expired. Automatically re-logging in...');
         const res = await this.performOAuthLogin(login, pass);
+        if (!res.success && res.isAuthRejection) {
+          const nextInvalid: AuthInvalidState = {
+            login,
+            message:
+              res.error ||
+              'Nieprawidłowy login lub hasło — zaktualizuj hasło do konta Librus.',
+            detectedAt: Date.now(),
+            notifiedInBackground: false,
+          };
+          this.authInvalidState = nextInvalid;
+          this.cookieStore.clear();
+          await this.deleteStoredData(STORAGE_KEYS.COOKIES);
+          await this.saveStoredData(
+            STORAGE_KEYS.AUTH_INVALID,
+            JSON.stringify(nextInvalid)
+          );
+          this.notifyAuthInvalidListeners();
+        }
         return res.success;
       } catch (err) {
         console.warn('[LibrusClient] Silent relogin failed:', err);
@@ -297,7 +438,7 @@ class LibrusClient {
   private async performOAuthLogin(
     login: string,
     pass: string
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; isAuthRejection?: boolean }> {
     try {
       this.cookieStore.clear();
 
@@ -344,14 +485,37 @@ class LibrusClient {
 
       const loginJson = await r3.json().catch(() => null);
 
-      if (!loginJson || (!loginJson.goTo && !r3.headers.get('location'))) {
+      if (!loginJson) {
+        return {
+          success: false,
+          isAuthRejection: false,
+          error:
+            r3.status >= 500
+              ? 'Serwer Librus Synergia ma przerwę techniczną. Spróbuj ponownie później.'
+              : 'Nie udało się połączyć z serwerem autoryzacji Librus.',
+        };
+      }
+
+      if (!loginJson.goTo && !r3.headers.get('location')) {
         const rawErr = loginJson?.errors?.[0];
         const errorText =
           typeof rawErr === 'string'
             ? rawErr
             : rawErr?.message || rawErr?.code || (rawErr ? JSON.stringify(rawErr) : 'Niepoprawny login lub hasło');
+
+        const isServerOrRateLimit =
+          r3.status >= 500 ||
+          r3.status === 429 ||
+          /captcha|zbyt wiele|przerw[ay]\s+technicz|chwilowo\s+niedostęp|spróbuj\s+ponownie\s+za/i.test(
+            String(errorText)
+          );
+        const hasAuthErrorPayload =
+          (Array.isArray(loginJson.errors) && loginJson.errors.length > 0) ||
+          loginJson.status === 'error';
+
         return {
           success: false,
+          isAuthRejection: !isServerOrRateLimit && hasAuthErrorPayload,
           error: errorText,
         };
       }
@@ -362,6 +526,9 @@ class LibrusClient {
         : `https://api.librus.pl${nextTarget}`;
 
       // Step 4: Follow continuation chain and handle intermediate requiredActions
+      let sawUnskippableRequiredAction = false;
+      let reachedSynergia = false;
+
       for (let hop = 0; hop < 10; hop++) {
         const hopRes = await this.doFetch(currentUrl, {
           headers: { Referer: loginPageUrl },
@@ -389,6 +556,8 @@ class LibrusClient {
               ? skipJson.goTo
               : `https://api.librus.pl${skipJson.goTo}`;
             continue;
+          } else {
+            sawUnskippableRequiredAction = true;
           }
         }
 
@@ -396,6 +565,7 @@ class LibrusClient {
           finalUrl.includes('synergia.librus.pl') ||
           (hopRes.headers.get('location') && hopRes.headers.get('location')!.includes('synergia.librus.pl'))
         ) {
+          reachedSynergia = true;
           break;
         }
 
@@ -407,7 +577,17 @@ class LibrusClient {
         }
       }
 
+      if (sawUnskippableRequiredAction && !reachedSynergia) {
+        return {
+          success: false,
+          isAuthRejection: true,
+          error:
+            'Konto Librus wymaga obowiązkowej zmiany hasła w portalu Librus — po zmianie wpisz nowe hasło tutaj.',
+        };
+      }
+
       this.authenticated = true;
+      this.savedLogin = login;
       await this.saveStoredData(
         STORAGE_KEYS.CREDENTIALS,
         JSON.stringify({ login, pass })
@@ -417,6 +597,14 @@ class LibrusClient {
         JSON.stringify(this.cookieStore.toJSON())
       );
 
+      if (this.authInvalidState !== null) {
+        this.authInvalidState = null;
+        await this.deleteStoredData(STORAGE_KEYS.AUTH_INVALID);
+        this.notifyAuthInvalidListeners();
+      } else {
+        await this.deleteStoredData(STORAGE_KEYS.AUTH_INVALID);
+      }
+
       return { success: true };
     } catch (err: any) {
       const errMsg =
@@ -425,6 +613,7 @@ class LibrusClient {
           : err?.message || err?.code || (err ? JSON.stringify(err) : 'Błąd połączenia z serwerem Synergia');
       return {
         success: false,
+        isAuthRejection: false,
         error: errMsg,
       };
     }
@@ -441,7 +630,7 @@ class LibrusClient {
     if (res.success) {
       await this.getStudentInfo();
     }
-    return res;
+    return { success: res.success, error: res.error };
   }
 
   async logout(): Promise<void> {
@@ -449,11 +638,18 @@ class LibrusClient {
     this.currentStudent = null;
     this.cachedGrades = [];
     this.authenticated = false;
+    this.savedLogin = null;
+    const hadInvalid = this.authInvalidState !== null;
+    this.authInvalidState = null;
     clearAllFileCaches();
     await this.deleteStoredData(STORAGE_KEYS.CREDENTIALS);
     await this.deleteStoredData(STORAGE_KEYS.COOKIES);
     await this.deleteStoredData(STORAGE_KEYS.STUDENT_INFO);
     await this.deleteStoredData(STORAGE_KEYS.GRADES_CACHE);
+    await this.deleteStoredData(STORAGE_KEYS.AUTH_INVALID);
+    if (hadInvalid) {
+      this.notifyAuthInvalidListeners();
+    }
   }
 
   async getStudentInfo(): Promise<StudentInfo | null> {
@@ -968,6 +1164,15 @@ class LibrusClient {
             .filter(Boolean);
           const flagText = flagMatches.join(', ');
           const flagLower = flagText.toLowerCase();
+          const isFreeDayFlag = /(?:woln|[śs]wi[ęe]t|feri|wakacj|przerw)/i.test(flagLower);
+
+          if (isFreeDayFlag) {
+            days[dayIdx].isFreeDay = true;
+            if (!days[dayIdx].freeDayLabel && flagText) {
+              days[dayIdx].freeDayLabel =
+                flagText.charAt(0).toUpperCase() + flagText.slice(1);
+            }
+          }
 
           // Find struck ranges
           const struckRanges: [number, number][] = [];
@@ -1023,10 +1228,12 @@ class LibrusClient {
           const struckEntry = entries.find((e) => e.struck);
           const primary = activeEntry || struckEntry!;
 
+          const isFreeDay = isFreeDayFlag;
           const isCancelled =
             !activeEntry ||
             flagLower.includes('odwołan') ||
-            flagLower.includes('odwolan');
+            flagLower.includes('odwolan') ||
+            isFreeDay;
 
           const hasOriginal = Boolean(activeEntry && struckEntry);
           const isSubstitution =
@@ -1065,6 +1272,7 @@ class LibrusClient {
             teacher: primary.teacher,
             classroom: primary.classroom,
             isCancelled: isCancelled || undefined,
+            isFreeDay: isFreeDay || undefined,
             isSubstitution: isSubstitution || undefined,
             changeType,
             original:
@@ -1083,7 +1291,8 @@ class LibrusClient {
       }
 
       const totalLessons = days.reduce((sum, d) => sum + d.lessons.length, 0);
-      if (totalLessons === 0) {
+      const hasAnyFreeDay = days.some((d) => d.isFreeDay);
+      if (totalLessons === 0 && !hasAnyFreeDay) {
         return null;
       }
 
@@ -1160,7 +1369,7 @@ class LibrusClient {
         const postExpired = this.isSessionExpired(postRes, postHtml);
         if (!postExpired) {
           const postWeek = this.parseTimetableFromHtml(postHtml, requestedMondayDate);
-          if (postWeek && postWeek.days.some((d) => d.lessons.length > 0)) {
+          if (postWeek && postWeek.days.some((d) => d.lessons.length > 0 || d.isFreeDay)) {
             return postWeek;
           }
         }
@@ -1176,12 +1385,15 @@ class LibrusClient {
           return {
             ...d,
             date: newDate,
+            isFreeDay: undefined,
+            freeDayLabel: undefined,
             lessons: d.lessons.map((l) => ({
               ...l,
               id: `${newDate}-${l.hourNumber}`,
               attendance: undefined,
               topic: undefined,
               isCancelled: undefined,
+              isFreeDay: undefined,
               isSubstitution: undefined,
               changeType: undefined,
               note: undefined,
@@ -1911,8 +2123,9 @@ class LibrusClient {
       }
 
       if (messages.length > 0) {
-        saveCachedMessages(folder, messages);
-        return messages;
+        const finalMessages = folder === 'inbox' ? applyInboxReadState(messages) : messages;
+        saveCachedMessages(folder, finalMessages);
+        return finalMessages;
       }
       // Distinguish a genuinely empty folder from an unauthenticated / redirect HTML shell
       if (/Brak\s+wiadomo[śs]ci|Nie\s+znaleziono\s+wiadomo[śs]ci/i.test(html)) {
@@ -2124,6 +2337,9 @@ class LibrusClient {
         attachments: attachments.length > 0 ? attachments : undefined,
       };
 
+      if (folderId === 5) {
+        markInboxMessageIdsRead([messageId]);
+      }
       saveCachedMessageDetail(detail);
       return detail;
     };
@@ -2808,6 +3024,444 @@ class LibrusClient {
         success: false,
         error: err?.message || 'Błąd połączenia podczas wysyłania wiadomości.',
       };
+    }
+  }
+
+  /**
+   * Scrapes school announcements from GET https://synergia.librus.pl/ogloszenia
+   */
+  async getAnnouncements(): Promise<SchoolAnnouncement[]> {
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) {
+      return getCachedAnnouncements();
+    }
+
+    const hashAnnouncement = (seed: string): string => {
+      let h = 2166136261;
+      for (let i = 0; i < seed.length; i++) {
+        h ^= seed.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return (h >>> 0).toString(36);
+    };
+
+    const fetchAnnouncementsHtml = async (): Promise<SchoolAnnouncement[] | null> => {
+      const res = await this.doFetch('https://synergia.librus.pl/ogloszenia');
+      const html = await res.text();
+
+      if (this.isSessionExpired(res, html)) {
+        return null;
+      }
+
+      const tables =
+        html.match(/<table\b[^>]*class="[^"]*\bdecorated\b[^"]*"[^>]*>[\s\S]*?<\/table>/gi) || [];
+
+      const results: SchoolAnnouncement[] = [];
+      const usedIds = new Set<string>();
+
+      for (const tableHtml of tables) {
+        const theadMatch = tableHtml.match(
+          /<thead\b[^>]*>[\s\S]*?<(?:td|th)\b[^>]*>([\s\S]*?)<\/(?:td|th)>[\s\S]*?<\/thead>/i
+        );
+        const title = theadMatch ? this.decodeHtml(theadMatch[1]).trim() : '';
+
+        let author = '';
+        let date = '';
+        let content = '';
+
+        const rowMatches = [
+          ...tableHtml.matchAll(
+            /<tr\b[^>]*>\s*<th\b[^>]*>([\s\S]*?)<\/th>\s*<td\b[^>]*>([\s\S]*?)<\/td>\s*<\/tr>/gi
+          ),
+        ];
+
+        for (const rm of rowMatches) {
+          const label = this.decodeHtml(rm[1]).trim();
+          const rawVal = rm[2] || '';
+
+          if (/^(?:Dodał|Autor|Nadawca)/i.test(label)) {
+            author = cleanLibrusPersonName(this.decodeHtml(rawVal).trim());
+          } else if (/^Data/i.test(label)) {
+            const decodedDate = this.decodeHtml(rawVal).trim();
+            const isoMatch = decodedDate.match(/(\d{4}-\d{2}-\d{2})/);
+            date = isoMatch ? isoMatch[1] : decodedDate;
+          } else if (/^(?:Treść|Opis)/i.test(label)) {
+            content = decodeHtmlEntities(rawVal, {
+              stripTags: true,
+              preserveNewlines: true,
+            });
+          }
+        }
+
+        if (!content && !date) {
+          continue;
+        }
+
+        const baseHash = hashAnnouncement(`${title}|${author}|${date}|${content.slice(0, 120)}`);
+        let id = `ann-${date || 'nodate'}-${baseHash}`;
+        let suffix = 2;
+        while (usedIds.has(id)) {
+          id = `ann-${date || 'nodate'}-${baseHash}-${suffix++}`;
+        }
+        usedIds.add(id);
+
+        results.push({
+          id,
+          title: title || 'Ogłoszenie szkolne',
+          author: author || 'Szkoła',
+          date,
+          content,
+        });
+      }
+
+      if (results.length > 0) {
+        saveCachedAnnouncements(results);
+        return results;
+      }
+
+      if (/Brak\s+ogłoszeń|Nie\s+znaleziono\s+ogłoszeń/i.test(html)) {
+        saveCachedAnnouncements([]);
+        return [];
+      }
+
+      return null;
+    };
+
+    try {
+      let list = await fetchAnnouncementsHtml();
+      if (!list) {
+        const relogged = await this.reloginWithStoredCredentials();
+        if (relogged) {
+          list = await fetchAnnouncementsHtml();
+        }
+      }
+      return list ?? getCachedAnnouncements();
+    } catch (err) {
+      console.warn('[librusClient] getAnnouncements failed, using cache:', err);
+      return getCachedAnnouncements();
+    }
+  }
+
+  /**
+   * Scrapes Terminarz events (sprawdziany, kartkówki, odpowiedzi, konsultacje, dni wolne)
+   * for a given calendar month (month = 1..12) via POST https://synergia.librus.pl/terminarz.
+   */
+  async getTerminarzMonth(year: number, month: number): Promise<TerminarzEvent[]> {
+    const ymKey = formatYearMonthKey(year, month);
+    const credsRaw = await this.getStoredData(STORAGE_KEYS.CREDENTIALS);
+    if (!credsRaw) {
+      return getCachedTerminarzMonth(ymKey) ?? [];
+    }
+
+    const fetchMonthHtml = async (): Promise<TerminarzEvent[] | null> => {
+      const params = new URLSearchParams();
+      params.append('rok', String(year));
+      params.append('miesiac', String(month));
+
+      const res = await this.doFetch('https://synergia.librus.pl/terminarz', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Referer: 'https://synergia.librus.pl/terminarz',
+        },
+        body: params.toString(),
+      });
+      const html = await res.text();
+
+      if (this.isSessionExpired(res, html)) {
+        return null;
+      }
+
+      if (!/kalendarz-dzien|kalendarz-numer-dnia/i.test(html)) {
+        return null;
+      }
+
+      const events: TerminarzEvent[] = [];
+      const seenIds = new Set<string>();
+      const dayChunks = html
+        .split(/<div\b[^>]*class="[^"]*\bkalendarz-dzien\b[^"]*"[^>]*>/i)
+        .slice(1);
+
+      for (const dayChunk of dayChunks) {
+        const numMatch = dayChunk.match(
+          /<div\b[^>]*class="[^"]*\bkalendarz-numer-dnia\b[^"]*"[^>]*>\s*(\d{1,2})\s*<\/div>/i
+        );
+        if (!numMatch) continue;
+        const dayNum = parseInt(numMatch[1], 10);
+        if (isNaN(dayNum) || dayNum < 1 || dayNum > 31) continue;
+
+        const dateIso = `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+
+        // Strip anything after the calendar table ends (e.g. legend/footer after the last day of the month)
+        const footerStart = dayChunk.search(
+          /(?:<div\b[^>]*class="[^"]*\b(?:legend|kalendarz-legenda|komunikat)\b|<\/form>|<script\b)/i
+        );
+        const dayScope = footerStart !== -1 ? dayChunk.slice(0, footerStart) : dayChunk;
+
+        const FREE_DAY_KEYWORD_RE =
+          /(?:święt|swiet|dzień\s+woln|dzien\s+woln|dni\s+woln|wolne\s+od|ferie|wakacj|przerw[ay]\s+świąt|przerw[ay]\s+swiat|dyrektorsk|rekolekcj|boże\s+ciało|boze\s+cialo|wielkanoc|wigili|nowy\s+rok|trzech\s+król|trzech\s+krol|edukacji\s+narodowej|wszystkich\s+świętych|wszystkich\s+swietych|majówk|majowk)/i;
+        const SCHOOL_UNIT_SUFFIX_RE =
+          /:\s*(?:[0-9]{1,2}\s*[A-Za-z]?\s*)?[A-Za-z0-9_.-]+\s*\(\d+\)\s*$/i;
+
+        const tdMatches = [...dayScope.matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/gi)];
+        let freeSeq = 1;
+        let foundFreeDayForDate = false;
+
+        for (const tdMatch of tdMatches) {
+          const attrs = tdMatch[1] || '';
+          const cellHtml = tdMatch[2] || '';
+          const combinedRawCell = `${attrs} ${cellHtml}`;
+
+          // Skip outer calendar grid cells that wrap another kalendarz-dzien
+          if (/kalendarz-numer-dnia|kalendarz-dzien/i.test(cellHtml)) {
+            continue;
+          }
+
+          const cellLines = decodeHtmlEntities(cellHtml, {
+            stripTags: true,
+            preserveNewlines: true,
+          })
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean);
+
+          if (cellLines.length === 0) continue;
+          const fullCellText = cellLines.join(' ');
+
+          // Skip Odwołane zajęcia / Zastępstwo / Przesunięcie cells (already handled live by getWeek)
+          if (
+            /(?:odwołan|odwolan|zastępstw|zastepstw|przesuni)/i.test(
+              fullCellText
+            )
+          ) {
+            continue;
+          }
+
+          const detailMatch = combinedRawCell.match(
+            /\/terminarz\/(szczegoly(?:_[a-z0-9]+)?)\/(\d+)/i
+          );
+
+          const hasLessonMeta =
+            /Nr\s+lekcji\s*:|Przedmiot\s*:|Nauczyciel\s*:/i.test(fullCellText) ||
+            /<span\b[^>]*class="[^"]*\bprzedmiot\b/i.test(cellHtml);
+
+          const isKeywordFreeDay =
+            FREE_DAY_KEYWORD_RE.test(fullCellText) ||
+            (!hasLessonMeta && SCHOOL_UNIT_SUFFIX_RE.test(cellLines[0] || ''));
+
+          if (!detailMatch && !isKeywordFreeDay) {
+            continue;
+          }
+
+          const detailKind = detailMatch?.[1]?.toLowerCase() ?? '';
+          const isFreeDay =
+            detailKind.includes('wolne') ||
+            detailKind.includes('kalendarz') ||
+            (!detailMatch && isKeywordFreeDay) ||
+            (detailKind === 'szczegoly' && isKeywordFreeDay && !hasLessonMeta);
+
+          const rawId = detailMatch?.[2] ?? `kw${freeSeq++}`;
+          const eventId = isFreeDay ? `free-${dateIso}-${rawId}` : `${rawId}-${dateIso}`;
+          if (seenIds.has(eventId)) continue;
+          seenIds.add(eventId);
+
+          // Parse tooltip title="Nauczyciel: ...&lt;br /&gt;Opis: ...&lt;br /&gt;Data dodania: ..."
+          let teacher: string | undefined;
+          let description: string | undefined;
+          let classroom: string | undefined;
+          let addedAt: string | undefined;
+          let tooltipSubject: string | undefined;
+
+          const titleAttrMatch =
+            attrs.match(/\btitle=(["'])([\s\S]*?)\1/i) ||
+            cellHtml.match(/\btitle=(["'])([\s\S]*?)\1/i);
+          if (titleAttrMatch && titleAttrMatch[2]) {
+            const decodedTooltip = decodeHtmlEntities(titleAttrMatch[2], {
+              stripTags: true,
+              preserveNewlines: true,
+            });
+            const tipLines = decodedTooltip
+              .split('\n')
+              .map((l) => l.trim())
+              .filter(Boolean);
+
+            let activeField: 'desc' | 'other' | null = null;
+            for (const line of tipLines) {
+              const kv = line.match(
+                /^(Nauczyciel|Dodał|Przedmiot|Rodzaj|Kategoria|Sala|Data dodania|Godzina|Przedział czasu|Czas|Klasa|Grupa|Opis)\s*:\s*(.*)$/i
+              );
+              if (kv) {
+                const key = kv[1].toLowerCase();
+                const val = kv[2].trim();
+                activeField = 'other';
+                if (key === 'nauczyciel' || key === 'dodał') {
+                  teacher = cleanLibrusPersonName(val) || undefined;
+                } else if (key === 'przedmiot') {
+                  tooltipSubject = val || undefined;
+                } else if (key === 'sala') {
+                  classroom = val || undefined;
+                } else if (key === 'data dodania') {
+                  addedAt = val || undefined;
+                } else if (key === 'opis') {
+                  description = val || undefined;
+                  activeField = 'desc';
+                }
+              } else if (activeField === 'desc') {
+                description = description ? `${description}\n${line}` : line;
+              }
+            }
+          }
+
+          const lessonNumLine = cellLines.find((l) => /^Nr\s+lekcji\s*:/i.test(l));
+          const lessonNumMatch = lessonNumLine?.match(/Nr\s+lekcji\s*:\s*(\d+)/i);
+          const parsedLessonNum = lessonNumMatch ? parseInt(lessonNumMatch[1], 10) : null;
+          const hasExplicitLessonZero = parsedLessonNum === 0;
+
+          const timeLine = cellLines.find((l) => /^(?:Czas|Przedział\s+czasu|Godzina)\s*:/i.test(l));
+          const timeRangeMatch = timeLine?.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/);
+          const normalizeClock = (hm?: string) => {
+            if (!hm) return undefined;
+            const [hh, mm] = hm.split(':');
+            return `${String(parseInt(hh, 10)).padStart(2, '0')}:${mm}`;
+          };
+          const startTime = normalizeClock(timeRangeMatch?.[1]);
+          const endTime = normalizeClock(timeRangeMatch?.[2]);
+
+          const lessonNumber =
+            parsedLessonNum !== null ? parsedLessonNum : startTime ? -1 : 0;
+
+          if (!classroom) {
+            const roomLine = cellLines.find((l) => /^Sala\s*:/i.test(l));
+            const roomMatch = roomLine?.match(/^Sala\s*:\s*(.+)$/i);
+            if (roomMatch && roomMatch[1].trim()) {
+              classroom = roomMatch[1].trim();
+            }
+          }
+
+          const subjSpanMatch = cellHtml.match(
+            /<span\b[^>]*class="[^"]*\bprzedmiot\b[^"]*"[^>]*>([\s\S]*?)<\/span>([\s\S]*?)(?=<br\b|$)/i
+          );
+
+          const subject = subjSpanMatch
+            ? this.decodeHtml(subjSpanMatch[1]).trim() || tooltipSubject
+            : tooltipSubject;
+
+          if (isFreeDay) {
+            foundFreeDayForDate = true;
+            const rawFreeLabel = cellLines[0] || description || 'Dzień wolny od szkoły';
+            const cleanedFreeLabel =
+              cleanFreeDayReason(rawFreeLabel) ||
+              cleanFreeDayReason(description) ||
+              rawFreeLabel;
+            events.push({
+              id: eventId,
+              date: dateIso,
+              lessonNumber: 0,
+              rawType: rawFreeLabel,
+              displayType: cleanedFreeLabel,
+              shortLabel: 'Wolne',
+              category: 'free_day',
+              description: cleanFreeDayReason(description) || description,
+              teacher,
+              addedAt,
+            });
+            continue;
+          }
+
+          let rawType = '';
+          if (subjSpanMatch && subjSpanMatch[2]) {
+            rawType = this.decodeHtml(subjSpanMatch[2])
+              .replace(/^[,:\-–\s]+/, '')
+              .trim();
+          }
+          if (!rawType) {
+            const nonMetaLines = cellLines.filter(
+              (l) =>
+                !/^Nr\s+lekcji\s*:/i.test(l) &&
+                !/^(?:Czas|Przedział\s+czasu|Godzina)\s*:/i.test(l) &&
+                !/^Sala\s*:/i.test(l)
+            );
+            rawType = nonMetaLines[0] || 'Wydarzenie';
+          }
+
+          const classified = classifyTerminarzType(rawType, description);
+
+          events.push({
+            id: eventId,
+            date: dateIso,
+            lessonNumber,
+            hasExplicitLessonZero: hasExplicitLessonZero || undefined,
+            startTime,
+            endTime,
+            rawType,
+            displayType: classified.displayType,
+            shortLabel: classified.shortLabel,
+            category: classified.category,
+            subject: subject || undefined,
+            teacher,
+            classroom,
+            description,
+            addedAt,
+          });
+        }
+
+        // Fallback: if no free day was found in <td>, check any standalone <div>/text inside kalendarz-dzien
+        if (!foundFreeDayForDate) {
+          const nonTdHtml = dayScope
+            .replace(
+              /<div\b[^>]*class="[^"]*\bkalendarz-numer-dnia\b[^"]*"[^>]*>[\s\S]*?<\/div>/gi,
+              ''
+            )
+            .replace(/<td\b[^>]*>[\s\S]*?<\/td>/gi, '');
+          const nonTdLines = decodeHtmlEntities(nonTdHtml, {
+            stripTags: true,
+            preserveNewlines: true,
+          })
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.length > 2 && !/^\d{1,2}$/.test(l));
+
+          for (const line of nonTdLines) {
+            if (/(?:odwołan|odwolan|zastępstw|zastepstw|przesuni)/i.test(line)) {
+              continue;
+            }
+            if (FREE_DAY_KEYWORD_RE.test(line) || SCHOOL_UNIT_SUFFIX_RE.test(line)) {
+              const eventId = `free-${dateIso}-div${freeSeq++}`;
+              if (!seenIds.has(eventId)) {
+                seenIds.add(eventId);
+                const cleanedFreeLabel = cleanFreeDayReason(line) || line;
+                events.push({
+                  id: eventId,
+                  date: dateIso,
+                  lessonNumber: 0,
+                  rawType: line,
+                  displayType: cleanedFreeLabel,
+                  shortLabel: 'Wolne',
+                  category: 'free_day',
+                });
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      saveCachedTerminarzMonth(ymKey, events);
+      return events;
+    };
+
+    try {
+      let monthEvents = await fetchMonthHtml();
+      if (!monthEvents) {
+        const relogged = await this.reloginWithStoredCredentials();
+        if (relogged) {
+          monthEvents = await fetchMonthHtml();
+        }
+      }
+      return monthEvents ?? getCachedTerminarzMonth(ymKey) ?? [];
+    } catch (err) {
+      console.warn(`[librusClient] getTerminarzMonth(${ymKey}) failed, using cache:`, err);
+      return getCachedTerminarzMonth(ymKey) ?? [];
     }
   }
 

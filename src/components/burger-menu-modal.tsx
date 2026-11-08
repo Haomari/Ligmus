@@ -27,9 +27,11 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
-  const { unreadMessagesCount, subjectAttendanceAlert } = useLibrus();
+  const { unreadMessagesCount, unreadAnnouncementsCount, subjectAttendanceAlert } =
+    useLibrus();
 
   const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const totalUnreadSkrzynka = unreadMessagesCount + unreadAnnouncementsCount;
 
   // Dynamic width bounded by min (324px) and max (420px), adapting to folded & unfolded screens
   const dynamicSheetWidth = Math.min(
@@ -48,14 +50,20 @@ export const BurgerMenuModal: React.FC<BurgerMenuModalProps> = ({
     {
       key: 'messages',
       route: '/messages',
-      title: 'Wiadomości',
-      subtitle: 'Odebrane, wysłane i usprawiedliwienia',
+      title: 'Skrzynka',
+      subtitle: 'Wiadomości, ogłoszenia i usprawiedliwienia',
       icon: 'mail-outline' as const,
       activeIcon: 'mail' as const,
       color: '#38bdf8',
       badge:
-        unreadMessagesCount > 0
-          ? `${unreadMessagesCount} ${unreadMessagesCount === 1 ? 'nowa' : 'nowe'}`
+        totalUnreadSkrzynka > 0
+          ? `${totalUnreadSkrzynka} ${
+              totalUnreadSkrzynka === 1
+                ? 'nowa'
+                : totalUnreadSkrzynka < 5
+                  ? 'nowe'
+                  : 'nowych'
+            }`
           : null,
       badgeColor: '#3b82f6',
     },

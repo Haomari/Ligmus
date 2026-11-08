@@ -2,49 +2,116 @@ import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { TimetableLesson } from '@/types/librus';
 import { getSubjectColor } from '@/utils/subjectColors';
+import {
+  getTerminarzColor,
+  isGradedAssessmentCategory,
+} from '@/utils/terminarzMatcher';
 import { AttendanceIcon } from './AttendanceIcon';
 
 interface LessonCardProps {
   lesson: TimetableLesson;
   top: number;
   height: number;
+  columnIndex?: number;
+  columnCount?: number;
   onPress: (lesson: TimetableLesson) => void;
+  onLongPress?: (lesson: TimetableLesson) => void;
 }
 
 export const LessonCard: React.FC<LessonCardProps> = ({
   lesson,
   top,
   height,
+  columnIndex = 0,
+  columnCount = 1,
   onPress,
+  onLongPress,
 }) => {
-  const isCancelled = Boolean(lesson.isCancelled);
-  const isSubstitution = !isCancelled && Boolean(lesson.isSubstitution);
-  const subjectColor = getSubjectColor(lesson.subject);
+  const isStandalone = Boolean(lesson.isStandaloneEvent);
+  const isFreeDay = !isStandalone && Boolean(lesson.isFreeDay);
+  const isCancelled = !isStandalone && Boolean(lesson.isCancelled || isFreeDay);
+  const isSubstitution = !isStandalone && !isCancelled && Boolean(lesson.isSubstitution);
 
-  const changeTagLabel = isCancelled
-    ? 'Odwołane'
-    : isSubstitution
-      ? lesson.changeType === 'room'
-        ? 'Zmiana sali'
-        : lesson.changeType === 'moved'
-          ? 'Przesunięto'
-          : 'Zastępstwo'
+  // Odwołane and Zastępstwo take top priority over Terminarz test outlines/badges
+  const primaryEvent =
+    !isCancelled && !isSubstitution && lesson.events && lesson.events.length > 0
+      ? lesson.events[0]
       : null;
+  const extraEventsCount =
+    primaryEvent && lesson.events && lesson.events.length > 1
+      ? lesson.events.length - 1
+      : 0;
+  const eventColor = primaryEvent ? getTerminarzColor(primaryEvent.category) : null;
+  const hasGradedAssessmentOutline = Boolean(
+    !isStandalone &&
+      primaryEvent &&
+      isGradedAssessmentCategory(primaryEvent.category)
+  );
+  const subjectColor =
+    isStandalone && eventColor ? eventColor : getSubjectColor(lesson.subject);
+
+  const changeTagLabel = isFreeDay
+    ? 'Dzień wolny'
+    : isCancelled
+      ? 'Odwołane'
+      : isSubstitution
+        ? lesson.changeType === 'room'
+          ? 'Zmiana sali'
+          : lesson.changeType === 'moved'
+            ? 'Przesunięto'
+            : 'Zastępstwo'
+        : null;
+
+  const outlineColor = isCancelled
+    ? 'rgba(239, 68, 68, 0.42)'
+    : isSubstitution
+      ? 'rgba(245, 158, 11, 0.65)'
+      : isStandalone && eventColor
+        ? `${eventColor}99`
+        : hasGradedAssessmentOutline && eventColor
+          ? eventColor
+          : 'rgba(51, 65, 85, 0.55)';
+
+  const autoFrom = primaryEvent?.autoAdjustedFromLesson;
+  const eventBadgeLabel = primaryEvent
+    ? `${primaryEvent.shortLabel}${
+        autoFrom !== undefined ? ` · z lek. ${autoFrom}` : ''
+      }${extraEventsCount > 0 ? ` +${extraEventsCount}` : ''}`
+    : '';
+
+  const horizontalPositionStyle =
+    columnCount > 1
+      ? {
+          left: `${(columnIndex * 100) / columnCount + (columnIndex > 0 ? 1 : 0)}%` as const,
+          width: `${100 / columnCount - 1}%` as const,
+          right: undefined,
+        }
+      : null;
+
+  const standaloneHasNoLessonNumber =
+    isStandalone && primaryEvent && primaryEvent.lessonNumber < 0;
+  const cleanClassroom = lesson.classroom
+    ? lesson.classroom.replace(/\s+/g, ' ').trim()
+    : '';
 
   return (
     <Pressable
       onPress={() => onPress(lesson)}
+      onLongPress={onLongPress ? () => onLongPress(lesson) : undefined}
+      delayLongPress={320}
       style={({ pressed }) => [
         styles.card,
         {
           top,
           height: Math.max(height - 2, 54),
-          borderColor: isCancelled
-            ? 'rgba(239, 68, 68, 0.35)'
-            : isSubstitution
-              ? 'rgba(245, 158, 11, 0.5)'
-              : `${subjectColor}44`,
+          borderColor: outlineColor,
+          borderWidth:
+            isCancelled || isSubstitution || hasGradedAssessmentOutline
+              ? 1.25
+              : 1,
         },
+        horizontalPositionStyle,
+        isStandalone && styles.cardStandalone,
         isCancelled && styles.cardCancelled,
         isSubstitution && styles.cardSubstitution,
         pressed && styles.cardPressed,
@@ -52,7 +119,7 @@ export const LessonCard: React.FC<LessonCardProps> = ({
       <View
         style={[
           styles.accentBar,
-          { backgroundColor: subjectColor },
+          { backgroundColor: isStandalone ? `${subjectColor}AA` : subjectColor },
           isCancelled && styles.accentCancelled,
           isSubstitution && styles.accentSubstitution,
         ]}
@@ -75,13 +142,14 @@ export const LessonCard: React.FC<LessonCardProps> = ({
                   styles.hourBadgeText,
                   !isCancelled && { color: subjectColor },
                 ]}>
-                {lesson.hourNumber}
+                {standaloneHasNoLessonNumber ? '•' : lesson.hourNumber}
               </Text>
             </View>
             <Text
               numberOfLines={1}
               style={[
                 styles.subject,
+                isStandalone && styles.subjectStandalone,
                 isCancelled && styles.subjectCancelled,
               ]}>
               {lesson.subject}
@@ -89,7 +157,7 @@ export const LessonCard: React.FC<LessonCardProps> = ({
           </View>
 
           <View style={styles.rightBadges}>
-            {changeTagLabel && (
+            {changeTagLabel ? (
               <View
                 style={[
                   styles.changeTag,
@@ -105,17 +173,51 @@ export const LessonCard: React.FC<LessonCardProps> = ({
                   {changeTagLabel}
                 </Text>
               </View>
+            ) : primaryEvent && eventColor ? (
+              <View
+                style={[
+                  styles.changeTag,
+                  hasGradedAssessmentOutline || isStandalone
+                    ? {
+                        backgroundColor: `${eventColor}1F`,
+                        borderColor: `${eventColor}66`,
+                      }
+                    : styles.subtleOtherTag,
+                ]}>
+                <Text
+                  style={[
+                    styles.changeTagText,
+                    {
+                      color:
+                        hasGradedAssessmentOutline || isStandalone
+                          ? eventColor
+                          : '#cbd5e1',
+                    },
+                  ]}>
+                  {eventBadgeLabel}
+                </Text>
+              </View>
+            ) : null}
+            {!isStandalone && (
+              <AttendanceIcon attendance={lesson.attendance} size="sm" />
             )}
-            <AttendanceIcon attendance={lesson.attendance} size="sm" />
           </View>
         </View>
 
         <View style={styles.bottomRow}>
           <Text numberOfLines={1} style={styles.metaText}>
             {lesson.startTime}–{lesson.endTime}
-            {lesson.classroom ? `  ·  s. ${lesson.classroom}` : ''}
-            {lesson.teacher ? `  ·  ${lesson.teacher}` : ''}
+            {!cleanClassroom && isStandalone && lesson.note
+              ? `  ·  ${lesson.note}`
+              : ''}
           </Text>
+          {cleanClassroom ? (
+            <View style={styles.roomPill}>
+              <Text numberOfLines={1} style={styles.roomPillText}>
+                s. {cleanClassroom}
+              </Text>
+            </View>
+          ) : null}
         </View>
       </View>
     </Pressable>
@@ -130,19 +232,26 @@ const styles = StyleSheet.create({
     backgroundColor: '#1e293b',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: 'rgba(51, 65, 85, 0.55)',
     flexDirection: 'row',
     overflow: 'hidden',
   },
+  cardStandalone: {
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    opacity: 0.96,
+    zIndex: 10,
+    elevation: 4,
+  },
   cardCancelled: {
-    backgroundColor: 'rgba(30, 41, 59, 0.5)',
-    opacity: 0.68,
+    backgroundColor: 'rgba(15, 23, 42, 0.36)',
+    opacity: 0.36,
+    zIndex: 1,
   },
   cardSubstitution: {
     backgroundColor: 'rgba(30, 41, 59, 0.95)',
   },
   cardPressed: {
-    opacity: 0.8,
+    opacity: 0.85,
     transform: [{ scale: 0.992 }],
   },
   accentBar: {
@@ -158,7 +267,7 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingVertical: 6,
     justifyContent: 'space-between',
   },
   topRow: {
@@ -193,6 +302,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
+  subjectStandalone: {
+    color: '#cbd5e1',
+    fontWeight: '600',
+  },
   subjectCancelled: {
     textDecorationLine: 'line-through',
     color: '#94a3b8',
@@ -216,26 +329,49 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(245, 158, 11, 0.16)',
     borderColor: 'rgba(245, 158, 11, 0.45)',
   },
+  subtleOtherTag: {
+    backgroundColor: 'rgba(148, 163, 184, 0.14)',
+    borderColor: 'rgba(148, 163, 184, 0.35)',
+  },
   changeTagText: {
     fontSize: 10,
     fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.3,
+    letterSpacing: 0.2,
   },
   changeTagTextCancelled: {
     color: '#f87171',
+    textTransform: 'uppercase',
   },
   changeTagTextSubstitution: {
     color: '#fbbf24',
+    textTransform: 'uppercase',
   },
   bottomRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
     marginTop: 2,
   },
   metaText: {
+    flex: 1,
     color: '#94a3b8',
     fontSize: 12,
     fontWeight: '500',
+  },
+  roomPill: {
+    flexShrink: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.3)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  roomPillText: {
+    color: '#e2e8f0',
+    fontSize: 11.5,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 });

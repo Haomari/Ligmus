@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   RefreshControl,
   ScrollView,
@@ -9,12 +9,17 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useLocalSearchParams } from 'expo-router';
 import { useLibrus } from '@/context/LibrusContext';
 import { Grade, SubjectGrades } from '@/types/librus';
 import { GradeDetailsModal, getGradeColor } from '@/components/grade-details-modal';
-import { WIDE_LAYOUT_BREAKPOINT } from '@/constants/layout';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
 
 export default function GradesScreen() {
+  const params = useLocalSearchParams<{ subjectId?: string; gradeId?: string }>();
   const { grades, isLoading, refreshData } = useLibrus();
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
@@ -22,6 +27,7 @@ export default function GradesScreen() {
 
   const [selectedSemester, setSelectedSemester] = useState<1 | 2>(1);
   const [hasInitializedSemester, setHasInitializedSemester] = useState(false);
+  const handledGradeParamRef = useRef<string | null>(null);
 
   // Modal State
   const [modalState, setModalState] = useState<{
@@ -50,14 +56,51 @@ export default function GradesScreen() {
         }
       }
 
-      if (latestSem2Date > latestSem1Date) {
-        setSelectedSemester(2);
-      } else {
-        setSelectedSemester(1);
-      }
-      setHasInitializedSemester(true);
+      const targetSem: 1 | 2 = latestSem2Date > latestSem1Date ? 2 : 1;
+      Promise.resolve().then(() => {
+        setSelectedSemester(targetSem);
+        setHasInitializedSemester(true);
+      });
     }
   }, [grades, hasInitializedSemester]);
+
+  // Support deep-linking from "Ostatnia aktywność" (?subjectId=...&gradeId=...)
+  useEffect(() => {
+    const gradeId = typeof params.gradeId === 'string' ? params.gradeId : '';
+    const subjectId = typeof params.subjectId === 'string' ? params.subjectId : '';
+    if (!gradeId || grades.length === 0) return;
+
+    const paramKey = `${subjectId}|${gradeId}`;
+    if (handledGradeParamRef.current === paramKey) return;
+
+    const targetSubj =
+      grades.find((s) => s.id === subjectId) ??
+      grades.find((s) => s.grades.some((g) => g.id === gradeId));
+    if (!targetSubj) return;
+
+    const targetGrade = targetSubj.grades.find((g) => g.id === gradeId);
+    if (!targetGrade) return;
+
+    handledGradeParamRef.current = paramKey;
+    const semGrades = targetSubj.grades
+      .filter((g) => g.semester === targetGrade.semester)
+      .sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0));
+    const idx = Math.max(
+      0,
+      semGrades.findIndex((g) => g.id === gradeId)
+    );
+
+    Promise.resolve().then(() => {
+      setSelectedSemester(targetGrade.semester);
+      setHasInitializedSemester(true);
+      setModalState({
+        visible: true,
+        subjectName: targetSubj.subjectName,
+        grades: semGrades.length > 0 ? semGrades : targetSubj.grades,
+        initialIndex: idx,
+      });
+    });
+  }, [params.subjectId, params.gradeId, grades]);
 
   // Compute total GPA for selected semester
   const validAverages = grades
@@ -153,7 +196,12 @@ export default function GradesScreen() {
         contentContainerStyle={[
           styles.listContainer,
           isWideScreen && styles.listContainerWide,
-          { paddingBottom: Math.max(insets.bottom + 24, 40) },
+          {
+            paddingBottom: Math.max(
+              getEffectiveBottomInset(insets.bottom, isWideScreen) + 28,
+              40
+            ),
+          },
         ]}
         showsVerticalScrollIndicator={false}
         refreshControl={

@@ -4,9 +4,15 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import {
+  getEffectiveBottomInset,
+  WIDE_LAYOUT_BREAKPOINT,
+} from '@/constants/layout';
 import { DaySchedule, TimetableLesson } from '@/types/librus';
 import { formatMinutesToHM, parseHM } from '@/utils/dates';
 import { LessonCard } from './LessonCard';
@@ -21,7 +27,8 @@ interface TimeGridProps {
   isToday: boolean;
   isRefreshing: boolean;
   onRefresh: () => void;
-  onPressLesson: (lesson: TimetableLesson, index: number) => void;
+  onPressLesson: (day: DaySchedule, lesson: TimetableLesson, index: number) => void;
+  onLongPressLesson?: (day: DaySchedule, lesson: TimetableLesson, index: number) => void;
 }
 
 export const TimeGrid: React.FC<TimeGridProps> = ({
@@ -30,9 +37,31 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
   isRefreshing,
   onRefresh,
   onPressLesson,
+  onLongPressLesson,
 }) => {
   const scrollRef = useRef<ScrollView>(null);
   const didAutoScrollRef = useRef(false);
+  const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const isWideScreen = windowWidth >= WIDE_LAYOUT_BREAKPOINT;
+  const effectiveBottomInset = getEffectiveBottomInset(
+    insets.bottom,
+    isWideScreen
+  );
+  const bottomScrollPadding = isWideScreen ? effectiveBottomInset + 132 : 116;
+
+  const regularLessons = useMemo(
+    () => (day.lessons || []).filter((l) => !l.isStandaloneEvent),
+    [day.lessons]
+  );
+  const isFreeDay = Boolean(
+    day.isFreeDay || regularLessons.some((l) => l.isFreeDay)
+  );
+  const freeDayReason =
+    day.freeDayLabel &&
+    !/^dzie[ńn]\s+woln/i.test(day.freeDayLabel.trim())
+      ? day.freeDayLabel.trim()
+      : undefined;
 
   const [nowMinutes, setNowMinutes] = useState<number>(() => {
     const now = new Date();
@@ -94,6 +123,47 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
     };
   }, [day.lessons]);
 
+  const layoutColumns = useMemo(() => {
+    const lessonsList = day.lessons || [];
+    const items = lessonsList.map((lesson, idx) => {
+      const startMin = parseHM(
+        lesson.startTime || lesson.timeSpan.split('-')[0] || '08:00'
+      );
+      const endMin = parseHM(
+        lesson.endTime || lesson.timeSpan.split('-')[1] || '08:45'
+      );
+      const isGhostedCancelled =
+        !lesson.isStandaloneEvent && Boolean(lesson.isCancelled || lesson.isFreeDay);
+      return {
+        idx,
+        startMin,
+        endMin: Math.max(endMin, startMin + 30),
+        isGhostedCancelled,
+        columnIndex: 0,
+        columnCount: 1,
+      };
+    });
+
+    for (let i = 0; i < items.length; i++) {
+      // Only split columns among cards of the same layer (active/standalone vs ghosted cancelled)
+      // so active Poprawa/Konsultacje cards sit full-width on top of ghosted free-day lessons
+      const overlapping = items.filter(
+        (other) =>
+          other.isGhostedCancelled === items[i].isGhostedCancelled &&
+          other.startMin < items[i].endMin &&
+          other.endMin > items[i].startMin
+      );
+      if (overlapping.length > 1) {
+        overlapping.forEach((entry, colIdx) => {
+          entry.columnIndex = colIdx;
+          entry.columnCount = overlapping.length;
+        });
+      }
+    }
+
+    return items;
+  }, [day.lessons]);
+
   const totalGridHeight = (gridEndMin - gridStartMin) * PX_PER_MIN;
   const showNowLine =
     isToday && nowMinutes >= gridStartMin - 15 && nowMinutes <= gridEndMin + 15;
@@ -113,7 +183,10 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
     return (
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={styles.emptyScrollContent}
+        contentContainerStyle={[
+          styles.emptyScrollContent,
+          { paddingBottom: bottomScrollPadding },
+        ]}
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing}
@@ -122,14 +195,34 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
             colors={['#3b82f6']}
           />
         }>
-        <View style={styles.emptyCard}>
-          <View style={styles.emptyIconCircle}>
-            <Ionicons name="calendar-clear-outline" size={32} color="#64748b" />
+        <View
+          style={[
+            styles.emptyCard,
+            isFreeDay && styles.emptyCardFreeDay,
+          ]}>
+          <View
+            style={[
+              styles.emptyIconCircle,
+              isFreeDay && styles.emptyIconCircleFreeDay,
+            ]}>
+            <Ionicons
+              name={isFreeDay ? 'sunny-outline' : 'calendar-clear-outline'}
+              size={32}
+              color={isFreeDay ? '#f87171' : '#64748b'}
+            />
           </View>
-          <Text style={styles.emptyTitle}>Brak lekcji w tym dniu</Text>
-          <Text style={styles.emptySubtitle}>
-            W wybranym dniu nie zaplanowano zajęć lekcyjnych.
+          <Text style={styles.emptyTitle}>
+            {isFreeDay ? 'Dzień wolny od szkoły' : 'Brak lekcji w tym dniu'}
           </Text>
+          {isFreeDay ? (
+            freeDayReason ? (
+              <Text style={styles.emptySubtitle}>{freeDayReason}</Text>
+            ) : null
+          ) : (
+            <Text style={styles.emptySubtitle}>
+              W wybranym dniu nie zaplanowano zajęć lekcyjnych.
+            </Text>
+          )}
         </View>
       </ScrollView>
     );
@@ -139,7 +232,10 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
     <ScrollView
       ref={scrollRef}
       style={styles.scroll}
-      contentContainerStyle={styles.scrollContent}
+      contentContainerStyle={[
+        styles.scrollContent,
+        { paddingBottom: bottomScrollPadding },
+      ]}
       showsVerticalScrollIndicator={false}
       refreshControl={
         <RefreshControl
@@ -167,12 +263,13 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
         {/* Lessons track */}
         <View style={styles.cardsTrack}>
           {day.lessons.map((lesson, index) => {
-            const startMin = parseHM(
-              lesson.startTime || lesson.timeSpan.split('-')[0] || '08:00'
-            );
-            const endMin = parseHM(
-              lesson.endTime || lesson.timeSpan.split('-')[1] || '08:45'
-            );
+            const colInfo = layoutColumns[index];
+            const startMin =
+              colInfo?.startMin ??
+              parseHM(lesson.startTime || lesson.timeSpan.split('-')[0] || '08:00');
+            const endMin =
+              colInfo?.endMin ??
+              parseHM(lesson.endTime || lesson.timeSpan.split('-')[1] || '08:45');
             const duration = Math.max(endMin - startMin, 30);
             const top = Math.max(0, (startMin - gridStartMin) * PX_PER_MIN);
             const height = duration * PX_PER_MIN;
@@ -183,7 +280,14 @@ export const TimeGrid: React.FC<TimeGridProps> = ({
                 lesson={lesson}
                 top={top}
                 height={height}
-                onPress={() => onPressLesson(lesson, index)}
+                columnIndex={colInfo?.columnIndex ?? 0}
+                columnCount={colInfo?.columnCount ?? 1}
+                onPress={() => onPressLesson(day, lesson, index)}
+                onLongPress={
+                  onLongPressLesson
+                    ? () => onLongPressLesson(day, lesson, index)
+                    : undefined
+                }
               />
             );
           })}
@@ -277,6 +381,10 @@ const styles = StyleSheet.create({
     padding: 28,
     alignItems: 'center',
   },
+  emptyCardFreeDay: {
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+    backgroundColor: 'rgba(30, 41, 59, 0.9)',
+  },
   emptyIconCircle: {
     width: 60,
     height: 60,
@@ -285,6 +393,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 14,
+  },
+  emptyIconCircleFreeDay: {
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
   },
   emptyTitle: {
     color: '#f8fafc',
